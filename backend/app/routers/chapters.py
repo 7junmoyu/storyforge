@@ -2,15 +2,26 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Chapter, ChapterRevision, Novel
+from app.models import Chapter, ChapterRevision, Novel, TextMark, Volume
 from app.schemas import ChapterIn, ChapterOut, ChapterUpdate, RevisionOut
 from app.textutil import count_words
 
 router = APIRouter(tags=["chapters"])
+
+
+class MoveIn(BaseModel):
+    direction: str = Field(pattern="^(up|down)$")
+
+
+class MarkIn(BaseModel):
+    quote: str = ""
+    start: int = Field(default=0, ge=0)
+    end: int = Field(default=0, ge=0)
 
 
 def _now() -> datetime:
@@ -21,6 +32,7 @@ def _chapter_out(chapter: Chapter) -> ChapterOut:
     return ChapterOut(
         id=chapter.id,
         novel_id=chapter.novel_id,
+        volume_id=chapter.volume_id,
         title=chapter.title,
         content=chapter.content,
         position=chapter.position,
@@ -45,9 +57,14 @@ def create_chapter(novel_id: uuid.UUID, payload: ChapterIn, db: Session = Depend
     if novel is None:
         raise HTTPException(404, "小说不存在")
     position = db.scalar(select(func.coalesce(func.max(Chapter.position), 0)).where(Chapter.novel_id == novel_id)) or 0
+    if payload.volume_id is not None:
+        volume = db.get(Volume, payload.volume_id)
+        if volume is None or volume.novel_id != novel_id:
+            raise HTTPException(404, "分卷不存在")
     chapter = Chapter(
         novel_id=novel_id,
         title=payload.title.strip(),
+        volume_id=payload.volume_id,
         content="<p></p>",
         position=int(position) + 1,
         word_count=0,
@@ -78,6 +95,13 @@ def update_chapter(chapter_id: uuid.UUID, payload: ChapterUpdate, db: Session = 
         chapter.word_count = count_words(payload.content)
     if payload.title is not None:
         chapter.title = payload.title.strip()
+    if payload.clear_volume:
+        chapter.volume_id = None
+    elif payload.volume_id is not None:
+        volume = db.get(Volume, payload.volume_id)
+        if volume is None or volume.novel_id != chapter.novel_id:
+            raise HTTPException(404, "分卷不存在")
+        chapter.volume_id = volume.id
     chapter.updated_at = _now()
     _touch_novel(db, chapter.novel_id)
     db.commit()
@@ -96,6 +120,54 @@ def delete_chapter(chapter_id: uuid.UUID, db: Session = Depends(get_db)) -> None
     novel_id = chapter.novel_id
     db.delete(chapter)
     _touch_novel(db, novel_id)
+    db.commit()
+
+
+@router.post("/chapters/{chapter_id}/move")
+def move_chapter(chapter_id: uuid.UUID, payload: MoveIn, db: Session = Depends(get_db)) -> list[ChapterOut]:
+    chapter = db.get(Chapter, chapter_id)
+    if chapter is None:
+        raise HTTPException(404, "章节不存在")
+    rows = list(
+        db.scalars(select(Chapter).where(Chapter.novel_id == chapter.novel_id).order_by(Chapter.position)).all()
+    )
+    index = next(i for i, item in enumerate(rows) if item.id == chapter.id)
+    target = index - 1 if payload.direction == "up" else index + 1
+    if 0 <= target < len(rows):
+        rows[index], rows[target] = rows[target], rows[index]
+        for position, item in enumerate(rows, start=1):
+            item.position = position
+        _touch_novel(db, chapter.novel_id)
+        db.commit()
+    return [_chapter_out(item) for item in rows]
+
+
+@router.get("/chapters/{chapter_id}/marks")
+def list_marks(chapter_id: uuid.UUID, db: Session = Depends(get_db)) -> list[dict]:
+    if db.get(Chapter, chapter_id) is None:
+        raise HTTPException(404, "章节不存在")
+    rows = db.scalars(select(TextMark).where(TextMark.chapter_id == chapter_id).order_by(TextMark.start)).all()
+    return [{"id": row.id, "quote": row.quote, "start": row.start, "end": row.end, "chapter_id": row.chapter_id} for row in rows]
+
+
+@router.post("/chapters/{chapter_id}/marks", status_code=201)
+def create_mark(chapter_id: uuid.UUID, payload: MarkIn, db: Session = Depends(get_db)) -> dict:
+    chapter = db.get(Chapter, chapter_id)
+    if chapter is None:
+        raise HTTPException(404, "章节不存在")
+    row = TextMark(novel_id=chapter.novel_id, chapter_id=chapter.id, quote=payload.quote.strip(), start=payload.start, end=payload.end)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"id": row.id, "quote": row.quote, "start": row.start, "end": row.end, "chapter_id": row.chapter_id}
+
+
+@router.delete("/marks/{mark_id}", status_code=204)
+def delete_mark(mark_id: uuid.UUID, db: Session = Depends(get_db)) -> None:
+    row = db.get(TextMark, mark_id)
+    if row is None:
+        raise HTTPException(404, "标记不存在")
+    db.delete(row)
     db.commit()
 
 

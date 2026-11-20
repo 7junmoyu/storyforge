@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import ai, chapters, novels, worlds
+from app.routers import ai, chapters, characters, foreshadows, novels, outline, worlds
 
 app = FastAPI(title="StoryForge", version="0.1.0")
 app.add_middleware(
@@ -11,11 +11,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(worlds.router, prefix="/api")
+app.include_router(characters.router, prefix="/api")
 app.include_router(novels.router, prefix="/api")
 app.include_router(chapters.router, prefix="/api")
 app.include_router(ai.router, prefix="/api")
+app.include_router(outline.router, prefix="/api")
+app.include_router(foreshadows.router, prefix="/api")
 
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/settings")
+def settings_view() -> dict[str, str | bool]:
+    from app.config import settings
+
+    return {
+        "ai_configured": bool(settings.ai_api_key.strip()),
+        "ai_model": settings.ai_model,
+        "ai_base_url": settings.ai_base_url,
+    }

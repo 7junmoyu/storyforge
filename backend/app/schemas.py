@@ -26,7 +26,11 @@ class NovelIn(BaseModel):
     genre: str = ""
     status: str = "draft"
     target_words: int = Field(default=0, ge=0)
+    tags: str = ""
+    cover_url: str = ""
     world_id: uuid.UUID | None = None
+    world_ids: list[uuid.UUID] | None = None
+    character_ids: list[uuid.UUID] = []
 
 
 class NovelUpdate(BaseModel):
@@ -35,8 +39,13 @@ class NovelUpdate(BaseModel):
     genre: str | None = None
     status: str | None = None
     target_words: int | None = Field(default=None, ge=0)
+    tags: str | None = None
+    cover_url: str | None = None
+    archived: bool | None = None
     world_id: uuid.UUID | None = None
+    world_ids: list[uuid.UUID] | None = None
     clear_world: bool = False
+    character_ids: list[uuid.UUID] | None = None
 
 
 class WorldBrief(BaseModel):
@@ -51,25 +60,33 @@ class NovelOut(BaseModel):
     genre: str
     status: str
     target_words: int
+    tags: str = ""
+    cover_url: str = ""
+    archived: bool = False
     word_count: int = 0
     chapter_count: int = 0
     worlds: list[WorldBrief] = []
+    characters: list[WorldBrief] = []
     created_at: datetime
     updated_at: datetime
 
 
 class ChapterIn(BaseModel):
     title: str = Field(min_length=1, max_length=200)
+    volume_id: uuid.UUID | None = None
 
 
 class ChapterUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     content: str | None = None
+    volume_id: uuid.UUID | None = None
+    clear_volume: bool = False
 
 
 class ChapterOut(BaseModel):
     id: uuid.UUID
     novel_id: uuid.UUID
+    volume_id: uuid.UUID | None = None
     title: str
     content: str
     position: int
@@ -82,11 +99,38 @@ class ChapterBrief(BaseModel):
     title: str
     position: int
     word_count: int
+    volume_id: uuid.UUID | None = None
     updated_at: datetime
 
 
 class NovelDetail(NovelOut):
     chapters: list[ChapterBrief] = []
+
+
+class VolumeIn(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+
+
+class VolumeOut(BaseModel):
+    id: uuid.UUID
+    novel_id: uuid.UUID
+    title: str
+    position: int
+
+
+class ImportedChapter(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    content: str = "<p></p>"
+
+
+class NovelImport(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    summary: str = ""
+    genre: str = ""
+    tags: str = ""
+    status: str = "draft"
+    target_words: int = Field(default=0, ge=0)
+    chapters: list[ImportedChapter] = []
 
 
 class RevisionOut(BaseModel):
@@ -96,7 +140,7 @@ class RevisionOut(BaseModel):
 
 
 class AiRequest(BaseModel):
-    action: str = Field(pattern="^(continue|expand|polish|rewrite)$")
+    action: str = Field(pattern="^(continue|expand|polish|rewrite|shorten|style|dialogue|character|plot|conflict)$")
     selected_text: str = ""
 
 

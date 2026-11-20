@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.ai import ACTIONS, complete_text
 from app.database import get_db
-from app.models import AiSuggestion, Chapter
+from sqlalchemy import select
+
+from app.models import AiSuggestion, Chapter, Novel
 from app.schemas import AiRequest, AiSuggestionOut
 from app.textutil import plain_text
 
@@ -34,7 +36,7 @@ async def create_suggestion(chapter_id: uuid.UUID, payload: AiRequest, db: Sessi
         raise HTTPException(422, "不支持的写作操作")
     context = plain_text(chapter.content)
     source = payload.selected_text.strip()
-    if payload.action != "continue" and not source:
+    if payload.action not in {"continue", "character", "plot", "conflict"} and not source:
         raise HTTPException(422, "请先选中一段正文")
     try:
         suggestion, provider = await complete_text(payload.action, source, context)
@@ -82,3 +84,26 @@ def reject_suggestion(suggestion_id: uuid.UUID, db: Session = Depends(get_db)) -
     db.commit()
     db.refresh(row)
     return _out(row)
+
+
+@router.get("/inbox/suggestions")
+def inbox_suggestions(db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.execute(
+        select(AiSuggestion, Chapter.title, Novel.id, Novel.title)
+        .join(Chapter, Chapter.id == AiSuggestion.chapter_id)
+        .join(Novel, Novel.id == Chapter.novel_id)
+        .where(AiSuggestion.status == "pending")
+        .order_by(AiSuggestion.created_at.desc())
+    ).all()
+    return [
+        {
+            "id": suggestion.id,
+            "action": suggestion.action,
+            "chapter_id": suggestion.chapter_id,
+            "chapter_title": chapter_title,
+            "novel_id": novel_id,
+            "novel_title": novel_title,
+            "created_at": suggestion.created_at,
+        }
+        for suggestion, chapter_title, novel_id, novel_title in rows
+    ]

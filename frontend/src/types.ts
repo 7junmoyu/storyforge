@@ -12,6 +12,15 @@ export type WorldBrief = {
   name: string
 }
 
+export type Character = {
+  id: string
+  name: string
+  summary: string
+  novel_count: number
+  created_at: string
+  updated_at: string
+}
+
 export type Novel = {
   id: string
   title: string
@@ -19,9 +28,13 @@ export type Novel = {
   genre: string
   status: "draft" | "writing" | "finished"
   target_words: number
+  tags: string
+  cover_url: string
+  archived: boolean
   word_count: number
   chapter_count: number
   worlds: WorldBrief[]
+  characters: WorldBrief[]
   created_at: string
   updated_at: string
 }
@@ -31,7 +44,15 @@ export type ChapterBrief = {
   title: string
   position: number
   word_count: number
+  volume_id: string | null
   updated_at: string
+}
+
+export type Volume = {
+  id: string
+  novel_id: string
+  title: string
+  position: number
 }
 
 export type NovelDetail = Novel & {
@@ -41,6 +62,7 @@ export type NovelDetail = Novel & {
 export type Chapter = {
   id: string
   novel_id: string
+  volume_id: string | null
   title: string
   content: string
   position: number
@@ -54,7 +76,59 @@ export type Revision = {
   created_at: string
 }
 
-export type AiAction = "continue" | "expand" | "polish" | "rewrite"
+export type AiAction = "continue" | "expand" | "polish" | "rewrite" | "shorten" | "style" | "dialogue" | "character" | "plot" | "conflict"
+
+export type OutlineNode = {
+  id: string
+  novel_id: string
+  parent_id: string | null
+  chapter_id: string | null
+  world_id: string | null
+  title: string
+  content: string
+  notes: string
+  status: "pending" | "active" | "done"
+  position: number
+  character_ids: string[]
+  updated_at: string
+}
+
+export type OutlineDraftNode = {
+  title: string
+  content: string
+  children: OutlineDraftNode[]
+}
+
+export type Foreshadow = {
+  id: string
+  novel_id: string
+  novel_title?: string
+  outline_node_id: string | null
+  name: string
+  content: string
+  kind: string
+  importance: "low" | "medium" | "high"
+  status: "planned" | "planted" | "pending_payoff" | "paid" | "discarded"
+  plant_chapter_id: string | null
+  expected_chapter_id: string | null
+  actual_chapter_id: string | null
+  source_quote: string
+  source_start: number | null
+  source_end: number | null
+  notes: string
+  character_ids: string[]
+  updated_at: string
+}
+
+export type PendingSuggestion = {
+  id: string
+  action: string
+  chapter_id: string
+  chapter_title: string
+  novel_id: string
+  novel_title: string
+  created_at: string
+}
 
 export type Suggestion = {
   id: string

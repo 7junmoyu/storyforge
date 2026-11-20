@@ -3,7 +3,6 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
-_SQLITE_PATH = (ROOT / "backend" / "storyforge.db").as_posix()
 
 
 class Settings(BaseSettings):
@@ -12,7 +11,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str = f"sqlite+pysqlite:///{_SQLITE_PATH}"
+    database_url: str = "postgresql+psycopg://storyforge:storyforge@127.0.0.1:5432/storyforge"
     ai_base_url: str = "https://api.openai.com/v1"
     ai_api_key: str = ""
     ai_model: str = "gpt-4o-mini"
