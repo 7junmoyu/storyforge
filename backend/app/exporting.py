@@ -42,6 +42,12 @@ def novel_pdf(title: str, chapters: list[tuple[str, str]]) -> bytes:
         f"<h1>{html.escape(title)}</h1>{blocks}</body></html>"
     )
     try:
+        import os
+
+        if not os.environ.get("WEASYPRINT_DLL_DIRECTORIES"):
+            dll_dir = r"C:\msys64\ucrt64\bin"
+            if os.path.isdir(dll_dir):
+                os.environ["WEASYPRINT_DLL_DIRECTORIES"] = dll_dir
         from weasyprint import HTML
 
         return HTML(string=markup).write_pdf()

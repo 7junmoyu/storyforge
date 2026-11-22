@@ -1,7 +1,10 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-from app.routers import ai, chapters, characters, foreshadows, novels, outline, worlds
+from app.routers import ai, chapters, characters, foreshadows, library, novels, outline, worlds
 
 app = FastAPI(title="StoryForge", version="0.1.0")
 app.add_middleware(
@@ -17,6 +20,11 @@ app.include_router(chapters.router, prefix="/api")
 app.include_router(ai.router, prefix="/api")
 app.include_router(outline.router, prefix="/api")
 app.include_router(foreshadows.router, prefix="/api")
+app.include_router(library.router, prefix="/api")
+
+uploads = Path(__file__).resolve().parents[1] / "data" / "uploads"
+uploads.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=uploads), name="uploads")
 
 
 @app.get("/api/health")

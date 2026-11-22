@@ -7,12 +7,14 @@ from pydantic import BaseModel, Field
 class WorldIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     summary: str = ""
+    cover_url: str | None = None
 
 
 class WorldOut(BaseModel):
     id: uuid.UUID
     name: str
     summary: str
+    cover_url: str = ""
     novel_count: int = 0
     created_at: datetime
     updated_at: datetime
@@ -46,6 +48,7 @@ class NovelUpdate(BaseModel):
     world_ids: list[uuid.UUID] | None = None
     clear_world: bool = False
     character_ids: list[uuid.UUID] | None = None
+    group_id: uuid.UUID | None = None
 
 
 class WorldBrief(BaseModel):
@@ -67,6 +70,8 @@ class NovelOut(BaseModel):
     chapter_count: int = 0
     worlds: list[WorldBrief] = []
     characters: list[WorldBrief] = []
+    group_id: uuid.UUID | None = None
+    grouped_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -81,12 +86,15 @@ class ChapterUpdate(BaseModel):
     content: str | None = None
     volume_id: uuid.UUID | None = None
     clear_volume: bool = False
+    world_id: uuid.UUID | None = None
+    clear_world: bool = False
 
 
 class ChapterOut(BaseModel):
     id: uuid.UUID
     novel_id: uuid.UUID
     volume_id: uuid.UUID | None = None
+    world_id: uuid.UUID | None = None
     title: str
     content: str
     position: int
@@ -100,6 +108,8 @@ class ChapterBrief(BaseModel):
     position: int
     word_count: int
     volume_id: uuid.UUID | None = None
+    world_id: uuid.UUID | None = None
+    excerpt: str = ""
     updated_at: datetime
 
 
@@ -109,6 +119,11 @@ class NovelDetail(NovelOut):
 
 class VolumeIn(BaseModel):
     title: str = Field(min_length=1, max_length=200)
+
+
+class VolumeUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    position: int | None = None
 
 
 class VolumeOut(BaseModel):

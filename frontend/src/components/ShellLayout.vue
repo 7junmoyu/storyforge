@@ -72,17 +72,19 @@ function activePath(path: string) {
   <RouterView v-if="writing" />
   <div v-else class="shell">
     <aside class="nav">
-      <RouterLink class="brand" to="/">
-        <strong>StoryForge</strong>
-        <span>{{ contextTitle || "故事工坊" }}</span>
-      </RouterLink>
+      <div class="nav-home">
+        <RouterLink class="brand" to="/">
+          <strong>StoryForge</strong>
+          <span :class="{ 'novel-name': inNovel && contextTitle }">{{ contextTitle || "故事工坊" }}</span>
+        </RouterLink>
+      </div>
       <nav v-if="inNovel" class="nav-links" aria-label="小说功能">
         <RouterLink
           v-for="item in novelLinks"
           :key="item.section"
           class="nav-link"
           :to="`/novels/${novelId}/${item.section}`"
-          :class="{ active: route.params.section === item.section }"
+          :class="{ active: route.params.section === item.section || (item.section === 'outline' && route.path.includes('/outline')) }"
         >{{ item.label }}</RouterLink>
       </nav>
       <nav v-else-if="inWorld" class="nav-links" aria-label="世界工作区">

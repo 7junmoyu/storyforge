@@ -1,9 +1,16 @@
 import type {
   AiAction,
   Chapter,
+  AttributeTemplate,
   Character,
+  CharacterPeriod,
+  MediaAsset,
+  WorldRecord,
+  ResourceLink,
+  CharacterVersion,
   Foreshadow,
   Novel,
+  NovelGroup,
   PendingSuggestion,
   NovelDetail,
   OutlineDraftNode,
@@ -38,38 +45,98 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   worlds: () => request<World[]>("/api/worlds"),
-  createWorld: (body: { name: string; summary: string }) =>
+  createWorld: (body: { name: string; summary: string; cover_url?: string }) =>
     request<World>("/api/worlds", { method: "POST", body: JSON.stringify(body) }),
-  updateWorld: (id: string, body: { name: string; summary: string }) =>
+  updateWorld: (id: string, body: { name: string; summary: string; cover_url?: string }) =>
     request<World>(`/api/worlds/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteWorld: (id: string) => request<void>(`/api/worlds/${id}`, { method: "DELETE" }),
   worldRelations: (id: string) =>
-    request<{ id: string; name: string; summary: string; novels: { id: string; title: string }[]; characters: { id: string; name: string; note: string }[] }>(
+    request<{ id: string; name: string; summary: string; novels: { id: string; title: string }[]; characters: ResourceLink[] }>(
       `/api/worlds/${id}/relations`,
     ),
-  characterWorlds: (id: string) => request<{ id: string; name: string; summary: string; note: string }[]>(`/api/characters/${id}/worlds`),
-  linkCharacterWorld: (characterId: string, body: { world_id: string; note: string }) =>
-    request<{ id: string; name: string; note: string }>(`/api/characters/${characterId}/worlds`, { method: "POST", body: JSON.stringify(body) }),
+  worldSetting: (worldId: string, novelId: string) =>
+    request<{ supplement: string }>(`/api/worlds/${worldId}/novels/${novelId}/setting`),
+  saveWorldSetting: (worldId: string, novelId: string, supplement: string) =>
+    request<{ supplement: string }>(`/api/worlds/${worldId}/novels/${novelId}/setting`, { method: "PUT", body: JSON.stringify({ supplement }) }),
+  characterWorlds: (id: string) => request<ResourceLink[]>(`/api/characters/${id}/worlds`),
+  linkCharacterWorld: (characterId: string, body: { world_id: string; note: string; scope: string; source: string; novel_id: string | null }) =>
+    request<ResourceLink>(`/api/characters/${characterId}/worlds`, { method: "POST", body: JSON.stringify(body) }),
   unlinkCharacterWorld: (characterId: string, worldId: string) =>
     request<void>(`/api/characters/${characterId}/worlds/${worldId}`, { method: "DELETE" }),
+  periods: (characterId: string) => request<CharacterPeriod[]>(`/api/characters/${characterId}/periods`),
+  createPeriod: (characterId: string, body: { name: string; time_range: string; attributes: Record<string, string> }) =>
+    request<CharacterPeriod>(`/api/characters/${characterId}/periods`, { method: "POST", body: JSON.stringify(body) }),
+  updatePeriod: (id: string, body: { name?: string; time_range?: string; attributes?: Record<string, string> }) =>
+    request<CharacterPeriod>(`/api/characters/periods/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deletePeriod: (id: string) => request<void>(`/api/characters/periods/${id}`, { method: "DELETE" }),
+  versions: (characterId: string) => request<CharacterVersion[]>(`/api/characters/${characterId}/versions`),
+  saveVersion: (characterId: string, novelId: string, body: { name: string; summary: string; attributes: Record<string, string>; period_id: string | null }) =>
+    request<CharacterVersion>(`/api/characters/${characterId}/versions/${novelId}`, { method: "PUT", body: JSON.stringify(body) }),
+  versionFromGlobal: (characterId: string, novelId: string, confirm: boolean) =>
+    request<CharacterVersion>(`/api/characters/${characterId}/versions/${novelId}/from-global`, { method: "POST", body: JSON.stringify({ confirm }) }),
+  versionFromPeriod: (characterId: string, novelId: string, periodId: string) =>
+    request<CharacterVersion>(`/api/characters/${characterId}/versions/${novelId}/from-period`, {
+      method: "POST",
+      body: JSON.stringify({ confirm: true, period_id: periodId }),
+    }),
+  deleteVersion: (characterId: string, novelId: string) =>
+    request<void>(`/api/characters/${characterId}/versions/${novelId}`, { method: "DELETE" }),
   marks: (chapterId: string) => request<{ id: string; quote: string; start: number; end: number; chapter_id: string }[]>(`/api/chapters/${chapterId}/marks`),
+  novelMarks: (novelId: string) => request<{ id: string; quote: string; start: number; end: number; chapter_id: string }[]>(`/api/novels/${novelId}/marks`),
   createMark: (chapterId: string, body: { quote: string; start: number; end: number }) =>
     request<{ id: string; quote: string; start: number; end: number }>(`/api/chapters/${chapterId}/marks`, { method: "POST", body: JSON.stringify(body) }),
   deleteMark: (id: string) => request<void>(`/api/marks/${id}`, { method: "DELETE" }),
   novels: (includeArchived = false) => request<Novel[]>(`/api/novels?include_archived=${includeArchived ? "true" : "false"}`),
+  novelGroups: () => request<NovelGroup[]>("/api/novels/groups"),
+  createNovelGroup: (name: string) => request<NovelGroup>("/api/novels/groups", { method: "POST", body: JSON.stringify({ name }) }),
+  renameNovelGroup: (id: string, name: string) => request<NovelGroup>(`/api/novels/groups/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+  deleteNovelGroup: (id: string) => request<void>(`/api/novels/groups/${id}`, { method: "DELETE" }),
   characters: (q = "") => request<Character[]>(`/api/characters?q=${encodeURIComponent(q)}`),
-  createCharacter: (body: { name: string; summary: string }) =>
+  createCharacter: (body: { name: string; summary: string; cover_url?: string }) =>
     request<Character>("/api/characters", { method: "POST", body: JSON.stringify(body) }),
-  updateCharacter: (id: string, body: { name: string; summary: string }) =>
+  updateCharacter: (id: string, body: { name: string; summary: string; cover_url?: string; attributes?: Record<string, string> }) =>
     request<Character>(`/api/characters/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  applyTemplate: (characterId: string, templateId: string) =>
+    request<Character>(`/api/characters/${characterId}/apply-template`, { method: "POST", body: JSON.stringify({ template_id: templateId, confirm: true }) }),
+  worldRecords: (worldId: string) => request<WorldRecord[]>(`/api/worlds/${worldId}/records`),
+  createWorldRecord: (worldId: string, body: { kind: string; name: string; summary: string; time_label: string }) =>
+    request<WorldRecord>(`/api/worlds/${worldId}/records`, { method: "POST", body: JSON.stringify(body) }),
+  updateWorldRecord: (id: string, body: { name?: string; summary?: string; time_label?: string }) =>
+    request<WorldRecord>(`/api/worlds/records/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteWorldRecord: (id: string) => request<void>(`/api/worlds/records/${id}`, { method: "DELETE" }),
+  templates: () => request<AttributeTemplate[]>("/api/templates"),
+  createTemplate: (body: { name: string; fields: string[] }) =>
+    request<AttributeTemplate>("/api/templates", { method: "POST", body: JSON.stringify(body) }),
+  deleteTemplate: (id: string) => request<void>(`/api/templates/${id}`, { method: "DELETE" }),
+  assets: (ownerKind: string, ownerId: string) => request<MediaAsset[]>(`/api/assets?owner_kind=${ownerKind}&owner_id=${ownerId}`),
+  uploadAsset: async (file: File, ownerKind: string, ownerId: string, note = "") => {
+    const body = new FormData()
+    body.append("file", file)
+    body.append("owner_kind", ownerKind)
+    body.append("owner_id", ownerId)
+    body.append("note", note)
+    const response = await fetch("/api/assets", { method: "POST", body })
+    if (!response.ok) {
+      let detail = "上传失败"
+      try {
+        const payload = (await response.json()) as { detail?: string }
+        if (payload.detail) detail = payload.detail
+      } catch {
+        detail = response.statusText || detail
+      }
+      throw new Error(detail)
+    }
+    return (await response.json()) as MediaAsset
+  },
+  deleteAsset: (id: string) => request<void>(`/api/assets/${id}`, { method: "DELETE" }),
   deleteCharacter: (id: string) => request<void>(`/api/characters/${id}`, { method: "DELETE" }),
   novel: (id: string) => request<NovelDetail>(`/api/novels/${id}`),
   createNovel: (body: {
     title: string
     summary: string
-    genre: string
-    status: Novel["status"]
-    target_words: number
+    genre?: string
+    status?: Novel["status"]
+    target_words?: number
     world_id?: string | null
     world_ids?: string[]
     character_ids?: string[]
@@ -82,6 +149,8 @@ export const api = {
   volumes: (novelId: string) => request<Volume[]>(`/api/novels/${novelId}/volumes`),
   createVolume: (novelId: string, title: string) =>
     request<Volume>(`/api/novels/${novelId}/volumes`, { method: "POST", body: JSON.stringify({ title }) }),
+  updateVolume: (novelId: string, volumeId: string, body: { title?: string; position?: number }) =>
+    request<Volume>(`/api/novels/${novelId}/volumes/${volumeId}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteVolume: (novelId: string, volumeId: string) =>
     request<void>(`/api/novels/${novelId}/volumes/${volumeId}`, { method: "DELETE" }),
   updateNovel: (id: string, body: Record<string, unknown>) =>
@@ -90,7 +159,7 @@ export const api = {
   createChapter: (novelId: string, title: string) =>
     request<Chapter>(`/api/novels/${novelId}/chapters`, { method: "POST", body: JSON.stringify({ title }) }),
   chapter: (id: string) => request<Chapter>(`/api/chapters/${id}`),
-  updateChapter: (id: string, body: { title?: string; content?: string; volume_id?: string | null; clear_volume?: boolean }) =>
+  updateChapter: (id: string, body: { title?: string; content?: string; volume_id?: string | null; clear_volume?: boolean; world_id?: string | null; clear_world?: boolean }) =>
     request<Chapter>(`/api/chapters/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteChapter: (id: string) => request<void>(`/api/chapters/${id}`, { method: "DELETE" }),
   revisions: (id: string) => request<Revision[]>(`/api/chapters/${id}/revisions`),
@@ -103,8 +172,6 @@ export const api = {
     }),
   acceptSuggestion: (id: string) => request<Suggestion>(`/api/suggestions/${id}/accept`, { method: "POST" }),
   rejectSuggestion: (id: string) => request<Suggestion>(`/api/suggestions/${id}/reject`, { method: "POST" }),
-  moveChapter: (id: string, direction: "up" | "down") =>
-    request<Chapter[]>(`/api/chapters/${id}/move`, { method: "POST", body: JSON.stringify({ direction }) }),
   outline: (novelId: string) => request<OutlineNode[]>(`/api/novels/${novelId}/outline`),
   createOutline: (novelId: string, body: Record<string, unknown>) =>
     request<OutlineNode>(`/api/novels/${novelId}/outline`, { method: "POST", body: JSON.stringify(body) }),

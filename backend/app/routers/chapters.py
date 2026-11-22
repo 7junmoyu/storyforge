@@ -7,15 +7,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Chapter, ChapterRevision, Novel, TextMark, Volume
+from app.models import Chapter, ChapterRevision, Novel, TextMark, Volume, World, novel_worlds
 from app.schemas import ChapterIn, ChapterOut, ChapterUpdate, RevisionOut
 from app.textutil import count_words
 
 router = APIRouter(tags=["chapters"])
-
-
-class MoveIn(BaseModel):
-    direction: str = Field(pattern="^(up|down)$")
 
 
 class MarkIn(BaseModel):
@@ -33,6 +29,7 @@ def _chapter_out(chapter: Chapter) -> ChapterOut:
         id=chapter.id,
         novel_id=chapter.novel_id,
         volume_id=chapter.volume_id,
+        world_id=chapter.world_id,
         title=chapter.title,
         content=chapter.content,
         position=chapter.position,
@@ -102,6 +99,18 @@ def update_chapter(chapter_id: uuid.UUID, payload: ChapterUpdate, db: Session = 
         if volume is None or volume.novel_id != chapter.novel_id:
             raise HTTPException(404, "分卷不存在")
         chapter.volume_id = volume.id
+    if payload.clear_world:
+        chapter.world_id = None
+    elif "world_id" in payload.model_fields_set and payload.world_id is not None:
+        world = db.get(World, payload.world_id)
+        if world is None:
+            raise HTTPException(404, "世界不存在")
+        chapter.world_id = world.id
+        linked = db.execute(
+            select(novel_worlds).where(novel_worlds.c.novel_id == chapter.novel_id, novel_worlds.c.world_id == world.id)
+        ).first()
+        if linked is None:
+            db.execute(novel_worlds.insert().values(novel_id=chapter.novel_id, world_id=world.id))
     chapter.updated_at = _now()
     _touch_novel(db, chapter.novel_id)
     db.commit()
@@ -123,23 +132,12 @@ def delete_chapter(chapter_id: uuid.UUID, db: Session = Depends(get_db)) -> None
     db.commit()
 
 
-@router.post("/chapters/{chapter_id}/move")
-def move_chapter(chapter_id: uuid.UUID, payload: MoveIn, db: Session = Depends(get_db)) -> list[ChapterOut]:
-    chapter = db.get(Chapter, chapter_id)
-    if chapter is None:
-        raise HTTPException(404, "章节不存在")
-    rows = list(
-        db.scalars(select(Chapter).where(Chapter.novel_id == chapter.novel_id).order_by(Chapter.position)).all()
-    )
-    index = next(i for i, item in enumerate(rows) if item.id == chapter.id)
-    target = index - 1 if payload.direction == "up" else index + 1
-    if 0 <= target < len(rows):
-        rows[index], rows[target] = rows[target], rows[index]
-        for position, item in enumerate(rows, start=1):
-            item.position = position
-        _touch_novel(db, chapter.novel_id)
-        db.commit()
-    return [_chapter_out(item) for item in rows]
+@router.get("/novels/{novel_id}/marks")
+def list_novel_marks(novel_id: uuid.UUID, db: Session = Depends(get_db)) -> list[dict]:
+    if db.get(Novel, novel_id) is None:
+        raise HTTPException(404, "小说不存在")
+    rows = db.scalars(select(TextMark).where(TextMark.novel_id == novel_id).order_by(TextMark.start)).all()
+    return [{"id": row.id, "quote": row.quote, "start": row.start, "end": row.end, "chapter_id": row.chapter_id} for row in rows]
 
 
 @router.get("/chapters/{chapter_id}/marks")

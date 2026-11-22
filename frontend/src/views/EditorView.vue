@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { BubbleMenu, EditorContent, useEditor } from "@tiptap/vue-3"
 import StarterKit from "@tiptap/starter-kit"
-import { NButton, NInput, useDialog, useMessage } from "naive-ui"
+import { NButton, NInput, NModal, useDialog, useMessage } from "naive-ui"
 import { computed, onBeforeUnmount, ref, watch } from "vue"
 import { RouterLink, useRoute, useRouter } from "vue-router"
 import { api } from "../api"
-import type { AiAction, ChapterBrief, NovelDetail, Revision, Suggestion, Volume } from "../types"
+import { InkMarks, inkMarkKey, type InkRange } from "../inkMarks"
+import type { AiAction, ChapterBrief, NovelDetail, Revision, Suggestion, Volume, World } from "../types"
 
 const route = useRoute()
 const router = useRouter()
@@ -23,7 +24,19 @@ const assistOpen = ref(false)
 const chaptersOpen = ref(true)
 const toolsOpen = ref(false)
 const marks = ref<{ id: string; quote: string; start: number; end: number; chapter_id: string }[]>([])
+const allMarks = ref<{ id: string; quote: string; start: number; end: number; chapter_id: string }[]>([])
 const volumes = ref<Volume[]>([])
+const allWorlds = ref<World[]>([])
+const collapsedVolumes = ref(new Set<string>())
+const volumeMenu = ref("")
+const volumeNameOpen = ref(false)
+const volumeName = ref("")
+const volumePickOpen = ref(false)
+const volumePickId = ref("")
+const volumePickIds = ref<string[]>([])
+const toolMenu = ref(false)
+const worldPick = ref(false)
+const markMenu = ref("")
 const findText = ref("")
 const replaceText = ref("")
 const range = ref<{ from: number; to: number } | null>(null)
@@ -49,7 +62,7 @@ const writingActions = new Set<AiAction>(["continue", "expand", "polish", "rewri
 
 const editor = useEditor({
   content: "<p></p>",
-  extensions: [StarterKit],
+  extensions: [StarterKit, InkMarks],
   onUpdate: () => {
     if (hydrating) return
     saveState.value = "未保存"
@@ -58,7 +71,40 @@ const editor = useEditor({
   },
 })
 
-const worldName = computed(() => novel.value?.worlds[0]?.name || "未关联世界")
+const activeChapter = computed(() => chapters.value.find((item) => item.id === activeId.value) || null)
+const chapterWorldName = computed(() => worldNameOf(activeChapter.value?.world_id || ""))
+
+function worldNameOf(id: string) {
+  if (!id) return ""
+  return allWorlds.value.find((item) => item.id === id)?.name || novel.value?.worlds.find((item) => item.id === id)?.name || ""
+}
+
+function marksOf(chapterId: string) {
+  return allMarks.value.filter((item) => item.chapter_id === chapterId).sort((a, b) => a.start - b.start)
+}
+
+function shortQuote(text: string) {
+  return text.replace(/\s+/g, "").slice(0, 4)
+}
+
+function emptyVolumeAnchor(volume: Volume) {
+  if (volume.position < 100) return volume.position / 1000
+  const slot = volume.position - 100
+  return Math.floor(slot / 100) + 0.5 + (slot % 100) * 0.01
+}
+
+const sidebar = computed(() => {
+  const loose = chapters.value.filter((item) => !item.volume_id).sort((a, b) => a.position - b.position)
+  const groups = volumes.value.map((volume) => {
+    const rows = chapters.value.filter((item) => item.volume_id === volume.id).sort((a, b) => a.position - b.position)
+    return { volume, chapters: rows, anchor: rows.length ? rows[0].position : emptyVolumeAnchor(volume) }
+  })
+  const items: ({ kind: "chapter"; chapter: ChapterBrief; anchor: number } | { kind: "volume"; volume: Volume; chapters: ChapterBrief[]; anchor: number })[] = [
+    ...loose.map((chapter) => ({ kind: "chapter" as const, chapter, anchor: chapter.position })),
+    ...groups.map((group) => ({ kind: "volume" as const, volume: group.volume, chapters: group.chapters, anchor: group.anchor })),
+  ]
+  return items.sort((a, b) => a.anchor - b.anchor || (a.kind === "volume" ? -1 : 1))
+})
 
 function paragraphs(text: string) {
   return text
@@ -72,6 +118,8 @@ async function loadNovel() {
   novel.value = detail
   chapters.value = detail.chapters
   volumes.value = await api.volumes(detail.id)
+  allMarks.value = await api.novelMarks(detail.id)
+  allWorlds.value = await api.worlds()
   const requested = String(route.params.chapterId || "")
   const next = chapters.value.find((item) => item.id === requested)?.id ?? chapters.value[0]?.id
   if (next) await openChapter(next)
@@ -87,6 +135,7 @@ async function openChapter(id: string) {
   hydrating = false
   savedHtml = editor.value?.getHTML() ?? chapter.content
   if (String(route.params.chapterId) === chapter.id) applyQuerySelection()
+  paintMarks()
   saveState.value = "已保存"
   suggestion.value = null
   showRevisions.value = false
@@ -131,36 +180,220 @@ async function addChapter() {
     position: created.position,
     word_count: 0,
     volume_id: created.volume_id,
+    world_id: created.world_id,
     updated_at: created.updated_at,
   })
   await openChapter(created.id)
 }
 
-async function moveChapter(chapter: ChapterBrief, direction: "up" | "down") {
-  const rows = await api.moveChapter(chapter.id, direction)
-  chapters.value = rows.map((row) => ({
-    id: row.id,
-    title: row.title,
-    position: row.position,
-    word_count: row.word_count,
-    volume_id: row.volume_id,
-    updated_at: row.updated_at,
-  }))
+function defaultVolumeTitle() {
+  return `第${volumes.value.length + 1}卷`
 }
 
-async function addVolume() {
+function openVolumeName() {
+  volumeName.value = ""
+  volumeNameOpen.value = true
+}
+
+async function confirmVolumeName(useDefault: boolean) {
   if (!novel.value) return
-  volumes.value.push(await api.createVolume(novel.value.id, `第${volumes.value.length + 1}卷`))
+  const typed = volumeName.value.trim()
+  if (!useDefault && !typed) return
+  const title = useDefault || !typed ? defaultVolumeTitle() : typed
+  volumeNameOpen.value = false
+  let created = await api.createVolume(novel.value.id, title)
+  const unplaced = volumes.value.filter((item) => item.position < 100).map((item) => item.position)
+  const position = unplaced.length ? Math.min(...unplaced) - 1 : 0
+  if (created.position !== position) created = await api.updateVolume(novel.value.id, created.id, { position })
+  volumes.value.push(created)
 }
 
-async function setVolume(chapter: ChapterBrief, volumeId: string) {
-  const updated = await api.updateChapter(chapter.id, volumeId ? { volume_id: volumeId } : { clear_volume: true })
-  chapter.volume_id = updated.volume_id
+function filledChapterIds(ids: string[]) {
+  const chosen = chapters.value.filter((item) => ids.includes(item.id))
+  if (chosen.length === 0) return []
+  const min = Math.min(...chosen.map((item) => item.position))
+  const max = Math.max(...chosen.map((item) => item.position))
+  return chapters.value.filter((item) => item.position >= min && item.position <= max).map((item) => item.id)
 }
 
-function onVolumeChange(chapter: ChapterBrief, event: Event) {
-  const value = (event.target as HTMLSelectElement).value
-  void setVolume(chapter, value)
+function paintMarks() {
+  const view = editor.value?.view
+  if (!view) return
+  const ranges: InkRange[] = marksOf(activeId.value).map((item) => ({ start: item.start, end: item.end }))
+  view.dispatch(view.state.tr.setMeta(inkMarkKey, ranges))
+}
+
+function toggleVolume(id: string) {
+  const next = new Set(collapsedVolumes.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  collapsedVolumes.value = next
+}
+
+function dragKind(event: DragEvent) {
+  return event.dataTransfer?.getData("text/plain") || ""
+}
+
+function onListDrop(event: DragEvent) {
+  const data = dragKind(event)
+  if (!data.startsWith("volume:")) return
+  void placeEmptyVolume(data.slice(7), null)
+}
+
+function onVolumeBlockDrop(volumeId: string, event: DragEvent) {
+  const data = dragKind(event)
+  if (data.startsWith("volume:")) {
+    event.stopPropagation()
+    void placeEmptyVolume(data.slice(7), `volume:${volumeId}`)
+    return
+  }
+  if (data.startsWith("chapter:")) {
+    event.stopPropagation()
+    void dropOnVolume(volumeId, data.slice(8))
+  }
+}
+
+function onChapterDrop(chapterId: string, event: DragEvent) {
+  const data = dragKind(event)
+  if (!data.startsWith("volume:")) return
+  event.stopPropagation()
+  void placeEmptyVolume(data.slice(7), `chapter:${chapterId}`)
+}
+
+function onChapterDrag(id: string, event: DragEvent) {
+  event.stopPropagation()
+  event.dataTransfer?.setData("text/plain", `chapter:${id}`)
+}
+
+function onVolumeDrag(id: string, event: DragEvent) {
+  event.stopPropagation()
+  event.dataTransfer?.setData("text/plain", `volume:${id}`)
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move"
+}
+
+async function placeEmptyVolume(volumeId: string, before: string | null) {
+  if (!novel.value) return
+  const moving = sidebar.value.find((block) => block.kind === "volume" && block.volume.id === volumeId && block.chapters.length === 0)
+  if (!moving || moving.kind !== "volume") return
+  if (before === `volume:${volumeId}`) return
+  const rest = sidebar.value.filter((block) => !(block.kind === "volume" && block.volume.id === volumeId && block.chapters.length === 0))
+  let index = rest.length
+  if (before) {
+    const found = rest.findIndex((block) =>
+      before.startsWith("chapter:")
+        ? block.kind === "chapter" && block.chapter.id === before.slice(8)
+        : block.kind === "volume" && block.volume.id === before.slice(7),
+    )
+    if (found >= 0) index = found
+  }
+  rest.splice(index, 0, moving)
+  let previous = 0
+  let gap = 0
+  for (const block of rest) {
+    if (block.kind === "chapter") {
+      previous = block.chapter.position
+      gap = 0
+      continue
+    }
+    if (block.chapters.length === 0) {
+      const position = 100 + previous * 100 + gap
+      gap += 1
+      if (block.volume.position !== position) {
+        const updated = await api.updateVolume(novel.value.id, block.volume.id, { position })
+        block.volume.position = updated.position
+      }
+      continue
+    }
+    const last = block.chapters[block.chapters.length - 1]
+    if (last) {
+      previous = last.position
+      gap = 0
+    }
+  }
+}
+
+async function dropOnVolume(volumeId: string, chapterId: string) {
+  const members = chapters.value.filter((item) => item.volume_id === volumeId || item.id === chapterId)
+  if (members.length === 0) return
+  const min = Math.min(...members.map((item) => item.position))
+  const max = Math.max(...members.map((item) => item.position))
+  const targets = chapters.value.filter((item) => item.position >= min && item.position <= max && item.volume_id !== volumeId)
+  for (const chapter of targets) {
+    const updated = await api.updateChapter(chapter.id, { volume_id: volumeId })
+    chapter.volume_id = updated.volume_id
+  }
+}
+
+async function setVolumeMembers(volumeId: string, ids: string[]) {
+  const chosen = new Set(ids)
+  for (const chapter of chapters.value) {
+    const inside = chapter.volume_id === volumeId
+    if (chosen.has(chapter.id) && !inside) {
+      const updated = await api.updateChapter(chapter.id, { volume_id: volumeId })
+      chapter.volume_id = updated.volume_id
+    } else if (!chosen.has(chapter.id) && inside) {
+      const updated = await api.updateChapter(chapter.id, { clear_volume: true })
+      chapter.volume_id = updated.volume_id
+    }
+  }
+}
+
+function openVolumePick(volume: Volume) {
+  volumeMenu.value = ""
+  volumePickId.value = volume.id
+  volumePickIds.value = filledChapterIds(chapters.value.filter((item) => item.volume_id === volume.id).map((item) => item.id))
+  volumePickOpen.value = true
+}
+
+function toggleVolumePick(chapterId: string) {
+  const next = volumePickIds.value.includes(chapterId)
+    ? volumePickIds.value.filter((id) => id !== chapterId)
+    : [...volumePickIds.value, chapterId]
+  volumePickIds.value = filledChapterIds(next)
+}
+
+async function confirmVolumePick() {
+  if (!volumePickId.value) return
+  const ids = filledChapterIds(volumePickIds.value)
+  volumePickOpen.value = false
+  await setVolumeMembers(volumePickId.value, ids)
+}
+
+async function removeVolume(volume: Volume) {
+  if (!novel.value) return
+  volumeMenu.value = ""
+  await api.deleteVolume(novel.value.id, volume.id)
+  volumes.value = volumes.value.filter((item) => item.id !== volume.id)
+  for (const chapter of chapters.value) {
+    if (chapter.volume_id === volume.id) chapter.volume_id = null
+  }
+}
+
+async function chooseChapterWorld(worldId: string) {
+  if (!activeChapter.value || !novel.value) return
+  worldPick.value = false
+  const updated = await api.updateChapter(activeChapter.value.id, { world_id: worldId })
+  activeChapter.value.world_id = updated.world_id
+  if (!novel.value.worlds.some((item) => item.id === worldId)) {
+    const world = allWorlds.value.find((item) => item.id === worldId)
+    if (world) novel.value.worlds.push({ id: world.id, name: world.name })
+  }
+}
+
+async function jumpToMark(chapter: ChapterBrief, mark: { start: number; end: number }) {
+  markMenu.value = ""
+  if (activeId.value !== chapter.id) await openChapter(chapter.id)
+  revealMark(mark)
+}
+
+function onMarkClick(chapter: ChapterBrief) {
+  const rows = marksOf(chapter.id)
+  if (rows.length === 0) return
+  if (rows.length === 1) {
+    void jumpToMark(chapter, rows[0])
+    return
+  }
+  markMenu.value = markMenu.value === chapter.id ? "" : chapter.id
 }
 
 function replaceTextInChapter(all: boolean) {
@@ -217,8 +450,11 @@ function applyQuerySelection() {
 async function markSelection() {
   const picked = selectedRange()
   if (!picked || !activeId.value) return
-  await api.createMark(activeId.value, { quote: picked.text, start: picked.from, end: picked.to })
+  const created = await api.createMark(activeId.value, { quote: picked.text, start: picked.from, end: picked.to })
   marks.value = await api.marks(activeId.value)
+  allMarks.value = [...allMarks.value.filter((item) => item.chapter_id !== activeId.value), ...marks.value]
+  if (!allMarks.value.some((item) => item.id === created.id)) allMarks.value.push({ ...created, chapter_id: activeId.value })
+  paintMarks()
   message.success("已记下这段文字和位置")
 }
 
@@ -289,6 +525,8 @@ async function revealMark(mark: { start: number; end: number }) {
 async function removeMark(id: string) {
   await api.deleteMark(id)
   marks.value = marks.value.filter((item) => item.id !== id)
+  allMarks.value = allMarks.value.filter((item) => item.id !== id)
+  paintMarks()
 }
 
 async function ask(action: AiAction) {
@@ -385,62 +623,139 @@ onBeforeUnmount(() => {
       <RouterLink class="nav-link" :to="`/novels/${novel.id}/articles`">返回文章</RouterLink>
       <span class="muted">{{ novel.title }}</span>
     </header>
-    <aside class="side">
-      <div class="section-title">
+    <aside class="side" @click="volumeMenu = ''; markMenu = ''" @dragover.prevent @drop="onListDrop">
+      <div class="side-pin">
         <strong>章节</strong>
         <span class="actions">
-          <button class="text-button" type="button" @click="addVolume">分卷</button>
+          <button class="text-button" type="button" @click="openVolumeName">分卷</button>
           <button class="text-button" type="button" @click="addChapter">新增</button>
         </span>
       </div>
-      <div
-        v-for="chapter in chapters"
-        :key="chapter.id"
-        class="chapter-item"
-        :class="{ active: chapter.id === activeId }"
-        @click="openChapter(chapter.id)"
-      >
-        <NInput v-model:value="chapter.title" size="small" @click.stop @blur="rename(chapter)" />
-        <select class="volume-select" :value="chapter.volume_id || ''" @click.stop @change="onVolumeChange(chapter, $event)">
-          <option value="">未分卷</option>
-          <option v-for="volume in volumes" :key="volume.id" :value="volume.id">{{ volume.title }}</option>
-        </select>
-        <div class="meta">
-          <span>{{ chapter.word_count }} 字</span>
-          <button type="button" class="text-button" @click.stop="moveChapter(chapter, 'up')">上移</button>
-          <button type="button" class="text-button" @click.stop="moveChapter(chapter, 'down')">下移</button>
+      <template v-for="block in sidebar" :key="block.kind === 'volume' ? block.volume.id : block.chapter.id">
+        <div
+          v-if="block.kind === 'volume'"
+          class="volume-block"
+          :class="{ 'can-move': block.chapters.length === 0 }"
+          :draggable="block.chapters.length === 0"
+          @dragstart="onVolumeDrag(block.volume.id, $event)"
+          @dragover.prevent
+          @drop="onVolumeBlockDrop(block.volume.id, $event)"
+        >
+          <div class="volume-head">
+            <button class="volume-title" type="button" @click="toggleVolume(block.volume.id)">{{ collapsedVolumes.has(block.volume.id) ? "▸" : "▾" }} {{ block.volume.title }}</button>
+            <button class="icon-button" type="button" aria-label="分卷设置" @click.stop="volumeMenu = volumeMenu === block.volume.id ? '' : block.volume.id">⋯</button>
+            <div v-if="volumeMenu === block.volume.id" class="menu-list" @click.stop>
+              <button type="button" @click="openVolumePick(block.volume)">选择章节</button>
+              <button class="danger" type="button" @click="removeVolume(block.volume)">删除分卷</button>
+            </div>
+          </div>
+          <template v-if="!collapsedVolumes.has(block.volume.id)">
+            <div
+              v-for="chapter in block.chapters"
+              :key="chapter.id"
+              class="chapter-item"
+              :class="{ active: chapter.id === activeId }"
+              draggable="true"
+              @dragstart="onChapterDrag(chapter.id, $event)"
+              @dragover.prevent
+              @drop="onChapterDrop(chapter.id, $event)"
+              @click="openChapter(chapter.id)"
+            >
+              <strong>{{ chapter.title }}</strong>
+              <div class="meta"><span>{{ chapter.word_count }} 字</span><span v-if="worldNameOf(chapter.world_id || '')">{{ worldNameOf(chapter.world_id || '') }}</span></div>
+              <div v-if="marksOf(chapter.id).length" class="mark-slot" @click.stop>
+                <template v-if="marksOf(chapter.id).length === 1">
+                  <button class="mark-quote" type="button" @click="onMarkClick(chapter)">{{ shortQuote(marksOf(chapter.id)[0].quote) }}</button>
+                  <button class="mark-delete" type="button" @click="removeMark(marksOf(chapter.id)[0].id)">删除</button>
+                </template>
+                <template v-else>
+                  <template v-if="markMenu !== chapter.id">
+                    <button class="mark-quote" type="button" @click="onMarkClick(chapter)">{{ shortQuote(marksOf(chapter.id)[0].quote) }}</button>
+                    <button class="mark-delete" type="button" @click="removeMark(marksOf(chapter.id)[0].id)">删除</button>
+                  </template>
+                  <div v-if="markMenu === chapter.id" class="mark-menu">
+                    <div v-for="mark in marksOf(chapter.id)" :key="mark.id" class="mark-entry">
+                      <button class="mark-quote" type="button" @click="jumpToMark(chapter, mark)">{{ shortQuote(mark.quote) }}</button>
+                      <button class="mark-delete" type="button" @click="removeMark(mark.id)">删除</button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+        <div
+          v-else
+          class="chapter-item"
+          :class="{ active: block.chapter.id === activeId }"
+          draggable="true"
+          @dragstart="onChapterDrag(block.chapter.id, $event)"
+          @dragover.prevent
+          @drop="onChapterDrop(block.chapter.id, $event)"
+          @click="openChapter(block.chapter.id)"
+        >
+          <strong>{{ block.chapter.title }}</strong>
+          <div class="meta"><span>{{ block.chapter.word_count }} 字</span><span v-if="worldNameOf(block.chapter.world_id || '')">{{ worldNameOf(block.chapter.world_id || '') }}</span></div>
+          <div v-if="marksOf(block.chapter.id).length" class="mark-slot" @click.stop>
+            <template v-if="marksOf(block.chapter.id).length === 1">
+              <button class="mark-quote" type="button" @click="onMarkClick(block.chapter)">{{ shortQuote(marksOf(block.chapter.id)[0].quote) }}</button>
+              <button class="mark-delete" type="button" @click="removeMark(marksOf(block.chapter.id)[0].id)">删除</button>
+            </template>
+            <template v-else>
+              <template v-if="markMenu !== block.chapter.id">
+                <button class="mark-quote" type="button" @click="onMarkClick(block.chapter)">{{ shortQuote(marksOf(block.chapter.id)[0].quote) }}</button>
+                <button class="mark-delete" type="button" @click="removeMark(marksOf(block.chapter.id)[0].id)">删除</button>
+              </template>
+              <div v-if="markMenu === block.chapter.id" class="mark-menu">
+                <div v-for="mark in marksOf(block.chapter.id)" :key="mark.id" class="mark-entry">
+                  <button class="mark-quote" type="button" @click="jumpToMark(block.chapter, mark)">{{ shortQuote(mark.quote) }}</button>
+                  <button class="mark-delete" type="button" @click="removeMark(mark.id)">删除</button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+    </aside>
+    <section class="manuscript" @click="toolMenu = false; worldPick = false">
+      <div class="manuscript-tools">
+        <div>
+          <input v-if="activeChapter" v-model="activeChapter.title" class="editor-title chapter-name" aria-label="章节名" @blur="rename(activeChapter)" />
+          <div class="meta">
+            <span class="world-pick">
+              <button class="text-button" type="button" @click.stop="worldPick = !worldPick">{{ chapterWorldName || "选择世界" }}</button>
+              <div v-if="worldPick" class="menu-list" @click.stop>
+                <button v-for="world in allWorlds" :key="world.id" type="button" @click="chooseChapterWorld(world.id)">{{ world.name }}</button>
+                <p v-if="allWorlds.length === 0" class="muted">还没有世界</p>
+              </div>
+            </span>
+            <span>{{ saveState }}</span>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="history-icon" type="button" aria-label="撤销" @click="editor?.chain().focus().undo().run()">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11" /></svg>
+          </button>
+          <button class="history-icon" type="button" aria-label="重做" @click="editor?.chain().focus().redo().run()">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="m15 14 5-5-5-5" /><path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5a5.5 5.5 0 0 0 5.5 5.5H13" /></svg>
+          </button>
+          <button class="text-button" type="button" @click="chaptersOpen = !chaptersOpen">{{ chaptersOpen ? "收起目录" : "展开目录" }}</button>
+          <button class="text-button" type="button" @click="assistOpen = !assistOpen">{{ assistOpen ? "收起建议" : "展开建议" }}</button>
+          <span class="tool-menu">
+            <button class="icon-button" type="button" aria-label="更多功能" @click.stop="toolMenu = !toolMenu">⋯</button>
+            <div v-if="toolMenu" class="menu-list" @click.stop>
+              <button type="button" @click="persist">{{ saveState === "保存失败" ? "重试" : "保存" }}</button>
+              <button type="button" @click="toolsOpen = !toolsOpen">查找</button>
+              <button type="button" @click="toggleRevisions">版本</button>
+              <a :href="`/api/novels/${novel.id}/export.txt`">TXT</a>
+              <a :href="`/api/novels/${novel.id}/export.docx`">DOCX</a>
+              <a :href="`/api/novels/${novel.id}/export.pdf`">PDF</a>
+              <button v-if="chapters.length > 1 && activeChapter" class="danger" type="button" @click="removeChapter(activeChapter)">删除章节</button>
+            </div>
+          </span>
         </div>
       </div>
-      <button v-if="chapters.length > 1" class="text-button" type="button" @click="removeChapter(chapters.find((item) => item.id === activeId)!)">删除当前章</button>
-      <div class="section-title" style="margin-top: 18px"><strong>标记</strong></div>
-      <button v-for="mark in marks" :key="mark.id" class="chapter-item" type="button" @click="revealMark(mark)">
-        <span class="summary">{{ mark.quote }}</span>
-        <span class="text-button" @click.stop="removeMark(mark.id)">删除</span>
-      </button>
-      <p v-if="marks.length === 0" class="muted">选中正文后可以标记，方便以后回到这里。</p>
-    </aside>
-    <section class="manuscript">
       <div class="paper">
-        <div class="section-title">
-          <div>
-            <h1 class="editor-title">{{ novel.title }}</h1>
-            <div class="meta"><span>{{ worldName }}</span><span>{{ saveState }}</span></div>
-          </div>
-          <div class="actions">
-            <button class="text-button" type="button" @click="editor?.chain().focus().undo().run()">撤销</button>
-            <button class="text-button" type="button" @click="editor?.chain().focus().redo().run()">重做</button>
-            <NButton size="small" type="primary" @click="persist">{{ saveState === "保存失败" ? "重试" : "保存" }}</NButton>
-            <button class="text-button" type="button" @click="toolsOpen = !toolsOpen">查找</button>
-            <button class="text-button" type="button" @click="toggleRevisions">版本</button>
-            <button class="text-button" type="button" @click="chaptersOpen = !chaptersOpen">{{ chaptersOpen ? "收起目录" : "目录" }}</button>
-            <button class="text-button" type="button" @click="assistOpen = !assistOpen">{{ assistOpen ? "收起建议" : "建议" }}</button>
-          </div>
-        </div>
-        <div class="meta export-links">
-          <a :href="`/api/novels/${novel.id}/export.txt`">TXT</a>
-          <a :href="`/api/novels/${novel.id}/export.docx`">DOCX</a>
-          <a :href="`/api/novels/${novel.id}/export.pdf`">PDF</a>
-        </div>
         <div v-show="toolsOpen" class="actions tools-row">
           <NInput v-model:value="findText" size="small" placeholder="查找" />
           <NInput v-model:value="replaceText" size="small" placeholder="替换" />
@@ -488,4 +803,24 @@ onBeforeUnmount(() => {
       </article>
     </aside>
   </div>
+  <NModal v-model:show="volumeNameOpen" preset="card" title="新建分卷" style="width: 420px">
+    <NInput v-model:value="volumeName" placeholder="分卷名称" @keyup.enter="confirmVolumeName(false)" />
+    <div class="actions" style="margin-top: 16px">
+      <NButton @click="confirmVolumeName(true)">使用默认名（{{ defaultVolumeTitle() }}）</NButton>
+      <NButton type="primary" :disabled="!volumeName.trim()" @click="confirmVolumeName(false)">确定</NButton>
+    </div>
+  </NModal>
+  <NModal v-model:show="volumePickOpen" preset="card" title="选择章节" style="width: 420px">
+    <div class="volume-choices">
+      <label v-for="chapter in chapters" :key="chapter.id">
+        <input type="checkbox" :checked="volumePickIds.includes(chapter.id)" @change="toggleVolumePick(chapter.id)" />
+        <span>{{ chapter.title }}</span>
+      </label>
+    </div>
+    <p class="muted">选中首尾章节后，中间的章节会一并加入。</p>
+    <div class="actions">
+      <NButton @click="volumePickOpen = false">取消</NButton>
+      <NButton type="primary" @click="confirmVolumePick">确定</NButton>
+    </div>
+  </NModal>
 </template>

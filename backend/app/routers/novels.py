@@ -2,14 +2,16 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_db
 from app.exporting import novel_docx, novel_pdf, novel_text
-from app.models import Chapter, Character, Novel, Volume, World
-from app.schemas import NovelDetail, NovelImport, NovelIn, NovelOut, NovelUpdate, VolumeIn, VolumeOut, WorldBrief
+from app.textutil import plain_text
+from app.models import Chapter, Character, CharacterVersion, Novel, NovelGroup, Volume, World
+from app.schemas import NovelDetail, NovelImport, NovelIn, NovelOut, NovelUpdate, VolumeIn, VolumeOut, VolumeUpdate, WorldBrief
 
 router = APIRouter(prefix="/novels", tags=["novels"])
 
@@ -43,6 +45,8 @@ def _out(db: Session, novel: Novel) -> NovelOut:
         archived=novel.archived,
         worlds=[WorldBrief(id=world.id, name=world.name) for world in novel.worlds],
         characters=[WorldBrief(id=row.id, name=row.name) for row in novel.characters],
+        group_id=novel.group_id,
+        grouped_at=novel.grouped_at,
         created_at=novel.created_at,
         updated_at=novel.updated_at,
     )
@@ -125,6 +129,53 @@ def create_novel(payload: NovelIn, db: Session = Depends(get_db)) -> NovelDetail
     return get_novel(novel.id, db)
 
 
+class GroupIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+def _group_out(row: NovelGroup) -> dict:
+    return {"id": row.id, "name": row.name, "created_at": row.created_at, "updated_at": row.updated_at}
+
+
+@router.get("/groups")
+def list_groups(db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.scalars(select(NovelGroup).order_by(NovelGroup.created_at.desc())).all()
+    return [_group_out(row) for row in rows]
+
+
+@router.post("/groups", status_code=201)
+def create_group(payload: GroupIn, db: Session = Depends(get_db)) -> dict:
+    row = NovelGroup(name=payload.name.strip())
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _group_out(row)
+
+
+@router.patch("/groups/{group_id}")
+def rename_group(group_id: uuid.UUID, payload: GroupIn, db: Session = Depends(get_db)) -> dict:
+    row = db.get(NovelGroup, group_id)
+    if row is None:
+        raise HTTPException(404, "分类不存在")
+    row.name = payload.name.strip()
+    row.updated_at = _now()
+    db.commit()
+    db.refresh(row)
+    return _group_out(row)
+
+
+@router.delete("/groups/{group_id}", status_code=204)
+def delete_group(group_id: uuid.UUID, db: Session = Depends(get_db)) -> None:
+    row = db.get(NovelGroup, group_id)
+    if row is None:
+        raise HTTPException(404, "分类不存在")
+    for novel in db.scalars(select(Novel).where(Novel.group_id == group_id)).all():
+        novel.group_id = None
+        novel.grouped_at = None
+    db.delete(row)
+    db.commit()
+
+
 @router.get("/{novel_id}", response_model=NovelDetail)
 def get_novel(novel_id: uuid.UUID, db: Session = Depends(get_db)) -> NovelDetail:
     novel = _get_novel(db, novel_id)
@@ -139,6 +190,8 @@ def get_novel(novel_id: uuid.UUID, db: Session = Depends(get_db)) -> NovelDetail
                 "position": chapter.position,
                 "word_count": chapter.word_count,
                 "volume_id": chapter.volume_id,
+                "world_id": chapter.world_id,
+                "excerpt": " ".join(plain_text(chapter.content).split())[:160],
                 "updated_at": chapter.updated_at,
             }
             for chapter in chapters
@@ -165,6 +218,15 @@ def update_novel(novel_id: uuid.UUID, payload: NovelUpdate, db: Session = Depend
         novel.tags = payload.tags.strip()
     if payload.cover_url is not None:
         novel.cover_url = payload.cover_url.strip()
+    if "group_id" in payload.model_fields_set:
+        if payload.group_id is None:
+            novel.group_id = None
+            novel.grouped_at = None
+        else:
+            if db.get(NovelGroup, payload.group_id) is None:
+                raise HTTPException(404, "分类不存在")
+            novel.group_id = payload.group_id
+            novel.grouped_at = _now()
     if payload.archived is not None:
         novel.archived = payload.archived
     if payload.character_ids is not None:
@@ -225,6 +287,17 @@ def duplicate_novel(novel_id: uuid.UUID, db: Session = Depends(get_db)) -> Novel
                 content=chapter.content,
                 position=chapter.position,
                 word_count=chapter.word_count,
+            )
+        )
+    for version in db.scalars(select(CharacterVersion).where(CharacterVersion.novel_id == source.id)).all():
+        db.add(
+            CharacterVersion(
+                novel_id=copy.id,
+                character_id=version.character_id,
+                period_id=version.period_id,
+                name=version.name,
+                summary=version.summary,
+                attributes=version.attributes,
             )
         )
     db.commit()
@@ -313,11 +386,14 @@ def create_volume(novel_id: uuid.UUID, payload: VolumeIn, db: Session = Depends(
 
 
 @router.patch("/{novel_id}/volumes/{volume_id}", response_model=VolumeOut)
-def update_volume(novel_id: uuid.UUID, volume_id: uuid.UUID, payload: VolumeIn, db: Session = Depends(get_db)) -> VolumeOut:
+def update_volume(novel_id: uuid.UUID, volume_id: uuid.UUID, payload: VolumeUpdate, db: Session = Depends(get_db)) -> VolumeOut:
     row = db.get(Volume, volume_id)
     if row is None or row.novel_id != novel_id:
         raise HTTPException(404, "分卷不存在")
-    row.title = payload.title.strip()
+    if payload.title is not None:
+        row.title = payload.title.strip()
+    if payload.position is not None:
+        row.position = payload.position
     db.commit()
     db.refresh(row)
     return VolumeOut(id=row.id, novel_id=row.novel_id, title=row.title, position=row.position)

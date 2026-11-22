@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { NButton, NForm, NFormItem, NInput, NInputNumber, NModal, NSelect, useDialog, useMessage } from "naive-ui"
+import { NButton, NForm, NFormItem, NInput, NModal, useDialog, useMessage } from "naive-ui"
 import { computed, onMounted, reactive, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { api } from "../api"
+import CoverField from "../components/CoverField.vue"
+import { coverSrc, novelCovers, worldCovers } from "../covers"
 import { libraryTick } from "../library"
-import type { Character, Foreshadow, Novel, PendingSuggestion, World } from "../types"
+import type { Character, Foreshadow, Novel, NovelGroup, PendingSuggestion, World } from "../types"
 
 const route = useRoute()
 const router = useRouter()
@@ -12,56 +14,57 @@ const showingWorlds = computed(() => route.path === "/worlds")
 const message = useMessage()
 const dialog = useDialog()
 const novels = ref<Novel[]>([])
+const groups = ref<NovelGroup[]>([])
 const worlds = ref<World[]>([])
 const inbox = ref<Foreshadow[]>([])
 const pending = ref<PendingSuggestion[]>([])
 const characters = ref<Character[]>([])
-const showArchived = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const loading = ref(true)
 const novelOpen = ref(false)
 const worldOpen = ref(false)
+const groupOpen = ref(false)
 const editingId = ref<string | null>(null)
+const openGroupId = ref<string | null>(null)
+const menuKey = ref("")
+const dropGroupId = ref("")
+const ignoreClick = ref(false)
+const groupName = ref("")
+const editingGroupId = ref("")
 
 const novelForm = reactive({
   title: "",
   summary: "",
-  genre: "",
-  status: "draft" as Novel["status"],
-  target_words: 0,
-  tags: "",
   cover_url: "",
   world_ids: [] as string[],
   character_ids: [] as string[],
 })
-const worldForm = reactive({ name: "", summary: "", id: "" })
+const worldForm = reactive({ name: "", summary: "", cover_url: "", id: "" })
 
-const statusOptions = [
-  { label: "构思中", value: "draft" },
-  { label: "创作中", value: "writing" },
-  { label: "已完结", value: "finished" },
-]
-const worldOptions = computed(() => worlds.value.map((world) => ({ label: world.name, value: world.id })))
-const characterOptions = computed(() => characters.value.map((row) => ({ label: row.name, value: row.id })))
 const totalWords = computed(() => novels.value.reduce((sum, novel) => sum + novel.word_count, 0))
 const totalChapters = computed(() => novels.value.reduce((sum, novel) => sum + novel.chapter_count, 0))
-const recentNovels = computed(() => novels.value.slice(0, 5))
-const recentWorlds = computed(() => [...worlds.value].sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, 5))
+const openGroup = computed(() => groups.value.find((group) => group.id === openGroupId.value) || null)
+const shelfNovels = computed(() => novels.value.filter((novel) => (openGroupId.value ? novel.group_id === openGroupId.value : !novel.group_id)))
 
-function statusLabel(status: Novel["status"]) {
-  return statusOptions.find((item) => item.value === status)?.label ?? status
+function groupCovers(groupId: string) {
+  return novels.value
+    .filter((novel) => novel.group_id === groupId)
+    .sort((a, b) => (b.grouped_at || "").localeCompare(a.grouped_at || ""))
+    .slice(0, 4)
 }
 
 async function reload() {
   loading.value = true
   try {
-    ;[novels.value, worlds.value, inbox.value, pending.value, characters.value] = await Promise.all([
-      api.novels(showArchived.value),
+    ;[novels.value, groups.value, worlds.value, inbox.value, pending.value, characters.value] = await Promise.all([
+      api.novels(true),
+      api.novelGroups(),
       api.worlds(),
       api.foreshadowInbox(),
       api.pendingSuggestions(),
       api.characters(),
     ])
+    if (openGroupId.value && !groups.value.some((group) => group.id === openGroupId.value)) openGroupId.value = null
   } catch (error) {
     message.error(error instanceof Error ? error.message : "加载失败")
   } finally {
@@ -71,24 +74,27 @@ async function reload() {
 
 function openCreateNovel() {
   editingId.value = null
-  Object.assign(novelForm, { title: "", summary: "", genre: "", status: "draft", target_words: 0, tags: "", cover_url: "", world_ids: [], character_ids: [] })
+  Object.assign(novelForm, { title: "", summary: "", cover_url: novelCovers[0].url, world_ids: [], character_ids: [] })
   novelOpen.value = true
 }
 
 function openEditNovel(novel: Novel) {
+  menuKey.value = ""
   editingId.value = novel.id
   Object.assign(novelForm, {
     title: novel.title,
     summary: novel.summary,
-    genre: novel.genre,
-    status: novel.status,
-    target_words: novel.target_words,
-    tags: novel.tags,
-    cover_url: novel.cover_url,
+    cover_url: novel.cover_url || novelCovers[0].url,
     world_ids: novel.worlds.map((row) => row.id),
     character_ids: novel.characters.map((row) => row.id),
   })
   novelOpen.value = true
+}
+
+function toggleId(list: string[], id: string) {
+  const index = list.indexOf(id)
+  if (index >= 0) list.splice(index, 1)
+  else list.push(id)
 }
 
 async function saveNovel() {
@@ -97,20 +103,16 @@ async function saveNovel() {
     return
   }
   try {
-    if (editingId.value) {
-      await api.updateNovel(editingId.value, {
-        title: novelForm.title,
-        summary: novelForm.summary,
-        genre: novelForm.genre,
-        status: novelForm.status,
-        target_words: novelForm.target_words,
-        tags: novelForm.tags,
-        cover_url: novelForm.cover_url,
-        world_ids: novelForm.world_ids,
-        character_ids: novelForm.character_ids,
-      })
-    } else {
-      const created = await api.createNovel({ ...novelForm })
+    const body = {
+      title: novelForm.title,
+      summary: novelForm.summary,
+      cover_url: novelForm.cover_url,
+      world_ids: novelForm.world_ids,
+      character_ids: novelForm.character_ids,
+    }
+    if (editingId.value) await api.updateNovel(editingId.value, body)
+    else {
+      const created = await api.createNovel(body)
       novelOpen.value = false
       await router.push(`/novels/${created.id}/overview`)
       return
@@ -123,12 +125,12 @@ async function saveNovel() {
 }
 
 function openCreateWorld() {
-  Object.assign(worldForm, { name: "", summary: "", id: "" })
+  Object.assign(worldForm, { name: "", summary: "", cover_url: worldCovers[0].url, id: "" })
   worldOpen.value = true
 }
 
 function openEditWorld(world: World) {
-  Object.assign(worldForm, { name: world.name, summary: world.summary, id: world.id })
+  Object.assign(worldForm, { name: world.name, summary: world.summary, cover_url: world.cover_url || worldCovers[0].url, id: world.id })
   worldOpen.value = true
 }
 
@@ -138,8 +140,9 @@ async function saveWorld() {
     return
   }
   try {
-    if (worldForm.id) await api.updateWorld(worldForm.id, { name: worldForm.name, summary: worldForm.summary })
-    else await api.createWorld({ name: worldForm.name, summary: worldForm.summary })
+    const body = { name: worldForm.name, summary: worldForm.summary, cover_url: worldForm.cover_url }
+    if (worldForm.id) await api.updateWorld(worldForm.id, body)
+    else await api.createWorld(body)
     worldOpen.value = false
     await reload()
   } catch (error) {
@@ -148,6 +151,7 @@ async function saveWorld() {
 }
 
 function removeNovel(novel: Novel) {
+  menuKey.value = ""
   dialog.warning({
     title: "删除小说",
     content: `删除《${novel.title}》后，章节会一起删除。关联的世界会保留。`,
@@ -165,14 +169,10 @@ function removeNovel(novel: Novel) {
 }
 
 async function duplicate(novel: Novel) {
+  menuKey.value = ""
   const created = await api.duplicateNovel(novel.id)
   message.success("已复制小说")
   await router.push(`/novels/${created.id}/overview`)
-}
-
-async function archive(novel: Novel) {
-  await api.updateNovel(novel.id, { archived: !novel.archived })
-  await reload()
 }
 
 async function importNovel(event: Event) {
@@ -207,16 +207,86 @@ function removeWorld(world: World) {
   })
 }
 
+function openGroupForm(group?: NovelGroup) {
+  menuKey.value = ""
+  editingGroupId.value = group?.id || ""
+  groupName.value = group?.name || ""
+  groupOpen.value = true
+}
+
+async function saveGroup() {
+  if (!groupName.value.trim()) return
+  if (editingGroupId.value) await api.renameNovelGroup(editingGroupId.value, groupName.value.trim())
+  else await api.createNovelGroup(groupName.value.trim())
+  groupOpen.value = false
+  await reload()
+}
+
+function removeGroup(group: NovelGroup) {
+  menuKey.value = ""
+  dialog.warning({
+    title: "删除分类",
+    content: `删除「${group.name}」后，里面的小说会回到列表里，小说本身不会删除。`,
+    positiveText: "删除",
+    negativeText: "取消",
+    onPositiveClick: async () => {
+      await api.deleteNovelGroup(group.id)
+      if (openGroupId.value === group.id) openGroupId.value = null
+      await reload()
+    },
+  })
+}
+
+function dragNovel(novel: Novel, event: DragEvent) {
+  ignoreClick.value = true
+  event.dataTransfer?.setData("text/plain", novel.id)
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move"
+}
+
+async function dropOnGroup(group: NovelGroup, event: DragEvent) {
+  dropGroupId.value = ""
+  ignoreClick.value = true
+  const novelId = event.dataTransfer?.getData("text/plain")
+  if (!novelId) return
+  await api.updateNovel(novelId, { group_id: group.id })
+  await reload()
+}
+
+async function leaveGroup(novel: Novel) {
+  menuKey.value = ""
+  await api.updateNovel(novel.id, { group_id: null })
+  await reload()
+}
+
+function enterNovel(id: string) {
+  if (ignoreClick.value) {
+    ignoreClick.value = false
+    return
+  }
+  if (menuKey.value) {
+    menuKey.value = ""
+    return
+  }
+  void router.push(`/novels/${id}/overview`)
+}
+
+function openShelfGroup(id: string) {
+  if (ignoreClick.value) {
+    ignoreClick.value = false
+    return
+  }
+  openGroupId.value = id
+}
+
 onMounted(reload)
 watch(libraryTick, () => void reload())
-watch(showArchived, () => void reload())
 </script>
 
 <template>
-  <main class="page">
+  <main class="page" @click="menuKey = ''">
     <header class="workspace-head">
       <div>
-        <h1>{{ showingWorlds ? "世界" : "小说" }}</h1>
+        <h1>{{ showingWorlds ? "世界" : openGroup ? openGroup.name : "小说" }}</h1>
         <p class="muted">
           <template v-if="showingWorlds">{{ worlds.length }} 个世界，可被多本小说引用</template>
           <template v-else>{{ novels.length }} 本 · {{ totalChapters }} 章 · {{ totalWords }} 字</template>
@@ -224,9 +294,10 @@ watch(showArchived, () => void reload())
       </div>
       <div class="actions">
         <template v-if="!showingWorlds">
-          <NButton size="small" @click="showArchived = !showArchived">{{ showArchived ? "隐藏归档" : "显示归档" }}</NButton>
+          <button v-if="openGroup" class="text-button" type="button" @click="openGroupId = null">返回全部</button>
           <NButton size="small" @click="fileInput?.click()">导入 JSON</NButton>
           <input ref="fileInput" type="file" accept="application/json,.json" hidden @change="importNovel" />
+          <NButton size="small" @click="openGroupForm()">添加分类</NButton>
           <NButton size="small" type="primary" @click="openCreateNovel">创建小说</NButton>
         </template>
         <NButton v-else size="small" type="primary" @click="openCreateWorld">创建世界</NButton>
@@ -234,28 +305,61 @@ watch(showArchived, () => void reload())
     </header>
 
     <section v-if="!showingWorlds">
-      <div v-if="!loading && novels.length === 0" class="empty">还没有小说。</div>
-      <div v-else class="card-grid">
-        <article v-for="novel in novels" :key="novel.id" class="card library-card">
-          <div>
+      <div v-if="!loading && novels.length === 0 && groups.length === 0" class="empty">还没有小说。</div>
+      <div v-else class="book-shelf">
+        <article
+          v-for="group in openGroup ? [] : groups"
+          :key="group.id"
+          class="book-card"
+          :class="{ 'drop-ready': dropGroupId === group.id }"
+          @click="openShelfGroup(group.id)"
+          @dragover.prevent="dropGroupId = group.id"
+          @dragleave="dropGroupId = ''"
+          @drop.prevent="dropOnGroup(group, $event)"
+        >
+          <div class="cover-mosaic">
+            <img v-for="novel in groupCovers(group.id)" :key="novel.id" :src="coverSrc(novel.cover_url)" alt="" />
+          </div>
+          <div class="book-copy">
+            <h2>{{ group.name }}</h2>
+            <p class="muted">{{ novels.filter((novel) => novel.group_id === group.id).length }} 本小说</p>
+          </div>
+          <div class="card-menu" @click.stop>
+            <button class="icon-button" type="button" aria-label="分类设置" @click="menuKey = menuKey === group.id ? '' : group.id">⋯</button>
+            <div v-if="menuKey === group.id" class="menu-list">
+              <button type="button" @click="openGroupForm(group)">改名</button>
+              <button class="danger" type="button" @click="removeGroup(group)">删除分类</button>
+            </div>
+          </div>
+        </article>
+
+        <article
+          v-for="novel in shelfNovels"
+          :key="novel.id"
+          class="book-card"
+          draggable="true"
+          @dragstart="dragNovel(novel, $event)"
+          @click="enterNovel(novel.id)"
+        >
+          <img class="book-cover" :src="coverSrc(novel.cover_url)" alt="" />
+          <div class="book-copy">
             <h2>{{ novel.title }}</h2>
-            <p class="muted summary">{{ novel.summary || "还没有简介" }}</p>
+            <p class="summary">{{ novel.summary || "还没有简介" }}</p>
+            <div class="meta">
+              <span>{{ novel.word_count }} 字</span>
+              <span>{{ novel.chapter_count }} 章</span>
+              <span>{{ novel.worlds.map((row) => row.name).join("、") || "未关联世界" }}</span>
+            </div>
           </div>
-          <div class="meta">
-            <span>{{ statusLabel(novel.status) }}</span>
-            <span>{{ novel.word_count }} 字</span>
-            <span>{{ novel.chapter_count }} 章</span>
-            <span>{{ novel.worlds.map((row) => row.name).join("、") || "未关联世界" }}</span>
-            <span>{{ novel.characters.map((row) => row.name).join("、") || "未关联角色" }}</span>
-            <span v-if="novel.archived">已归档</span>
-          </div>
-          <div class="actions">
-            <NButton size="small" type="primary" @click="router.push(`/novels/${novel.id}/overview`)">进入</NButton>
-            <button class="text-button" type="button" @click="openEditNovel(novel)">编辑</button>
-            <button class="text-button" type="button" @click="duplicate(novel)">复制</button>
-            <button class="text-button" type="button" @click="archive(novel)">{{ novel.archived ? "取消归档" : "归档" }}</button>
-            <a class="text-button" :href="`/api/novels/${novel.id}/export.txt`">导出</a>
-            <button class="text-button danger" type="button" @click="removeNovel(novel)">删除</button>
+          <div class="card-menu" @click.stop>
+            <button class="icon-button" type="button" aria-label="小说设置" @click="menuKey = menuKey === novel.id ? '' : novel.id">⋯</button>
+            <div v-if="menuKey === novel.id" class="menu-list">
+              <button type="button" @click="openEditNovel(novel)">编辑</button>
+              <button type="button" @click="duplicate(novel)">复制</button>
+              <a :href="`/api/novels/${novel.id}/export.txt`">导出</a>
+              <button v-if="novel.group_id" type="button" @click="leaveGroup(novel)">移出分类</button>
+              <button class="danger" type="button" @click="removeNovel(novel)">删除</button>
+            </div>
           </div>
         </article>
       </div>
@@ -263,46 +367,67 @@ watch(showArchived, () => void reload())
 
     <section v-else>
       <div v-if="!loading && worlds.length === 0" class="empty">还没有世界。</div>
-      <div v-else class="card-grid">
-        <article v-for="world in worlds" :key="world.id" class="card library-card">
-          <div>
+      <div v-else class="book-shelf">
+        <article v-for="world in worlds" :key="world.id" class="resource-card" @click="router.push(`/worlds/${world.id}/overview`)">
+          <img class="book-cover" :src="coverSrc(world.cover_url, 'world')" alt="" />
+          <div class="book-copy">
             <h2>{{ world.name }}</h2>
-            <p class="muted summary">{{ world.summary || "还没有介绍" }}</p>
+            <p class="summary">{{ world.summary || "还没有介绍" }}</p>
+            <div class="meta"><span>{{ world.novel_count }} 本小说</span></div>
           </div>
-          <div class="meta"><span>{{ world.novel_count }} 本小说</span></div>
-          <div class="actions">
-            <NButton size="small" type="primary" @click="router.push(`/worlds/${world.id}/overview`)">查看</NButton>
-            <button class="text-button" type="button" @click="openEditWorld(world)">编辑</button>
-            <button class="text-button danger" type="button" @click="removeWorld(world)">删除</button>
+          <div class="card-menu" @click.stop>
+            <button class="icon-button" type="button" aria-label="世界设置" @click="menuKey = menuKey === world.id ? '' : world.id">⋯</button>
+            <div v-if="menuKey === world.id" class="menu-list">
+              <button type="button" @click="openEditWorld(world)">编辑</button>
+              <button class="danger" type="button" @click="removeWorld(world)">删除</button>
+            </div>
           </div>
         </article>
       </div>
     </section>
 
-    <NModal v-model:show="novelOpen" preset="card" :title="editingId ? '编辑小说' : '创建小说'" style="width: 520px">
+    <NModal v-model:show="novelOpen" preset="card" :title="editingId ? '编辑小说' : '创建小说'" style="width: 640px">
       <NForm label-placement="top">
         <NFormItem label="名称"><NInput v-model:value="novelForm.title" /></NFormItem>
         <NFormItem label="简介"><NInput v-model:value="novelForm.summary" type="textarea" :autosize="{ minRows: 3, maxRows: 6 }" /></NFormItem>
-        <NFormItem label="类型"><NInput v-model:value="novelForm.genre" /></NFormItem>
-        <NFormItem label="状态"><NSelect v-model:value="novelForm.status" :options="statusOptions" /></NFormItem>
-        <NFormItem label="目标字数"><NInputNumber v-model:value="novelForm.target_words" :min="0" style="width: 100%" /></NFormItem>
-        <NFormItem label="标签"><NInput v-model:value="novelForm.tags" placeholder="用逗号分开" /></NFormItem>
-        <NFormItem label="封面地址"><NInput v-model:value="novelForm.cover_url" placeholder="图片地址，素材库以后再做" /></NFormItem>
-        <NFormItem label="关联世界"><NSelect v-model:value="novelForm.world_ids" multiple :options="worldOptions" placeholder="可以稍后关联" /></NFormItem>
-        <NFormItem label="关联角色"><NSelect v-model:value="novelForm.character_ids" multiple :options="characterOptions" placeholder="可以稍后关联" /></NFormItem>
+        <NFormItem label="封面">
+          <CoverField v-model="novelForm.cover_url" :choices="novelCovers" owner-kind="novel" :owner-id="editingId || ''" />
+        </NFormItem>
+        <NFormItem label="关联世界">
+          <div class="pick-list">
+            <button v-for="world in worlds" :key="world.id" type="button" :class="{ on: novelForm.world_ids.includes(world.id) }" @click="toggleId(novelForm.world_ids, world.id)">{{ world.name }}</button>
+            <span v-if="worlds.length === 0" class="muted">还没有世界</span>
+          </div>
+        </NFormItem>
+        <NFormItem label="关联角色">
+          <div class="pick-list">
+            <button v-for="row in characters" :key="row.id" type="button" :class="{ on: novelForm.character_ids.includes(row.id) }" @click="toggleId(novelForm.character_ids, row.id)">{{ row.name }}</button>
+            <span v-if="characters.length === 0" class="muted">还没有角色</span>
+          </div>
+        </NFormItem>
       </NForm>
       <template #footer>
         <NButton type="primary" @click="saveNovel">保存</NButton>
       </template>
     </NModal>
 
-    <NModal v-model:show="worldOpen" preset="card" :title="worldForm.id ? '编辑世界' : '创建世界'" style="width: 480px">
+    <NModal v-model:show="worldOpen" preset="card" :title="worldForm.id ? '编辑世界' : '创建世界'" style="width: 640px">
       <NForm label-placement="top">
         <NFormItem label="名称"><NInput v-model:value="worldForm.name" /></NFormItem>
         <NFormItem label="介绍"><NInput v-model:value="worldForm.summary" type="textarea" :autosize="{ minRows: 3, maxRows: 6 }" /></NFormItem>
+        <NFormItem label="图片">
+          <CoverField v-model="worldForm.cover_url" :choices="worldCovers" owner-kind="world" :owner-id="worldForm.id" />
+        </NFormItem>
       </NForm>
       <template #footer>
         <NButton type="primary" @click="saveWorld">保存</NButton>
+      </template>
+    </NModal>
+
+    <NModal v-model:show="groupOpen" preset="card" :title="editingGroupId ? '修改分类' : '添加分类'" style="width: 420px">
+      <NFormItem label="分类名称"><NInput v-model:value="groupName" /></NFormItem>
+      <template #footer>
+        <NButton type="primary" @click="saveGroup">保存</NButton>
       </template>
     </NModal>
   </main>

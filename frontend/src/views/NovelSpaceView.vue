@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { NButton, NForm, NFormItem, NInput, NSelect, useDialog, useMessage } from "naive-ui"
+import { NButton, NForm, NFormItem, NInput, NModal, NSelect, useDialog, useMessage } from "naive-ui"
 import { computed, reactive, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { api } from "../api"
+import CoverField from "../components/CoverField.vue"
+import { characterCovers, coverSrc, worldCovers } from "../covers"
 import type { ChapterBrief, Character, Foreshadow, NovelDetail, OutlineDraftNode, OutlineNode, World } from "../types"
 
 const route = useRoute()
@@ -13,16 +15,21 @@ const novel = ref<NovelDetail | null>(null)
 const worlds = ref<World[]>([])
 const allCharacters = ref<Character[]>([])
 const linkedCharacterIds = ref<string[]>([])
-const newCharacterName = ref("")
 const nodes = ref<OutlineNode[]>([])
 const foreshadows = ref<Foreshadow[]>([])
 const worldIds = ref<string[]>([])
-const newWorldName = ref("")
-const treeOpen = ref(localStorage.getItem("sf-outline-tree") !== "0")
-const aiOpen = ref(localStorage.getItem("sf-outline-ai") !== "0")
-const outlineForm = reactive({ id: "", parent_id: null as string | null, world_id: null as string | null, title: "", content: "", notes: "", status: "pending", character_ids: [] as string[] })
+const menuKey = ref("")
+const addWorldOpen = ref(false)
+const addCharacterOpen = ref(false)
+const worldCreateOpen = ref(false)
+const characterCreateOpen = ref(false)
+const foreshadowOpen = ref(false)
+const foreshadowMore = ref(false)
+const collapsed = ref(new Set<string>())
+const ignoreDrag = ref(false)
+const worldForm = reactive({ name: "", summary: "", cover_url: worldCovers[0].url })
+const characterForm = reactive({ name: "", summary: "", cover_url: characterCovers[0].url })
 const outlineReport = ref("")
-const outlineOpen = ref(false)
 const draft = ref<OutlineDraftNode[] | null>(null)
 const draftProvider = ref("")
 const instruction = ref("")
@@ -49,15 +56,23 @@ const foreshadowReview = ref<{ foreshadow_id: string; name: string; reason: stri
 const foreshadowReviewReport = ref("")
 const foreshadowDraft = ref<Partial<Foreshadow> | null>(null)
 const draggingId = ref("")
+const foreshadowHint = ref("")
 
 const novelId = computed(() => String(route.params.novelId))
 const section = computed(() => String(route.params.section || "articles"))
 const chapterOptions = computed(() => (novel.value?.chapters ?? []).map((chapter) => ({ label: chapter.title, value: chapter.id })))
 const nodeOptions = computed(() => nodes.value.map((node) => ({ label: node.title, value: node.id })))
-const worldOptions = computed(() => worlds.value.map((world) => ({ label: world.name, value: world.id })))
-const characterOptions = computed(() => allCharacters.value.map((row) => ({ label: row.name, value: row.id })))
 const linkedCharacterOptions = computed(() => (novel.value?.characters ?? []).map((row) => ({ label: row.name, value: row.id })))
-const linkedWorldOptions = computed(() => (novel.value?.worlds ?? []).map((row) => ({ label: row.name, value: row.id })))
+const linkedWorldCards = computed(() => (novel.value?.worlds ?? []).flatMap((row) => {
+  const world = worlds.value.find((item) => item.id === row.id)
+  return world ? [world] : []
+}))
+const linkedCharacterCards = computed(() => (novel.value?.characters ?? []).flatMap((row) => {
+  const character = allCharacters.value.find((item) => item.id === row.id)
+  return character ? [character] : []
+}))
+const availableWorldOptions = computed(() => worlds.value.filter((row) => !worldIds.value.includes(row.id)).map((row) => ({ label: row.name, value: row.id })))
+const availableCharacterOptions = computed(() => allCharacters.value.filter((row) => !linkedCharacterIds.value.includes(row.id)).map((row) => ({ label: row.name, value: row.id })))
 const orderedNodes = computed(() => {
   const result: OutlineNode[] = []
   const walk = (parentId: string | null) => {
@@ -69,6 +84,16 @@ const orderedNodes = computed(() => {
   walk(null)
   return result
 })
+const visibleNodes = computed(() => orderedNodes.value.filter((node) => {
+  let cursor = node.parent_id
+  const seen = new Set<string>()
+  while (cursor && !seen.has(cursor)) {
+    if (collapsed.value.has(cursor)) return false
+    seen.add(cursor)
+    cursor = nodes.value.find((item) => item.id === cursor)?.parent_id ?? null
+  }
+  return true
+}))
 
 const outlineStatus = [
   { label: "未开始", value: "pending" },
@@ -106,6 +131,17 @@ function childrenOf(parentId: string | null) {
     .sort((a, b) => a.position - b.position)
 }
 
+function hasChildren(id: string) {
+  return nodes.value.some((node) => node.parent_id === id)
+}
+
+function toggleFold(id: string) {
+  const next = new Set(collapsed.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  collapsed.value = next
+}
+
 function depth(node: OutlineNode) {
   let level = 0
   let cursor = node.parent_id
@@ -123,7 +159,8 @@ async function load() {
   novel.value = detail
   worldIds.value = detail.worlds.map((row) => row.id)
   linkedCharacterIds.value = detail.characters.map((row) => row.id)
-  if (section.value === "world") worlds.value = await api.worlds()
+  menuKey.value = ""
+  if (section.value === "overview" || section.value === "world") worlds.value = await api.worlds()
   if (section.value === "characters" || section.value === "outline" || section.value === "foreshadows") {
     allCharacters.value = await api.characters()
   }
@@ -139,54 +176,70 @@ async function loadForeshadows() {
   foreshadows.value = await api.foreshadows(novelId.value, suffix)
 }
 
-async function saveWorldLink() {
+async function saveWorldLink(removed = false) {
   if (!novel.value) return
   await api.updateNovel(novel.value.id, { world_ids: worldIds.value })
-  message.success("已更新世界关联，解除关联不会删除世界")
+  message.success(removed ? "已解除关联，世界还在" : "已关联到这本小说")
   await load()
 }
 
-async function saveCharacterLinks() {
+async function saveCharacterLinks(removed = false) {
   if (!novel.value) return
   await api.updateNovel(novel.value.id, { character_ids: linkedCharacterIds.value })
-  message.success("已更新关联。解除关联不会删除全局角色。")
+  message.success(removed ? "已解除关联，角色还在" : "已关联到这本小说")
   await load()
 }
 
-async function createLinkedCharacter() {
-  if (!newCharacterName.value.trim()) return
-  const created = await api.createCharacter({ name: newCharacterName.value.trim(), summary: "" })
-  newCharacterName.value = ""
+function openCreateWorld() {
+  Object.assign(worldForm, { name: "", summary: "", cover_url: worldCovers[0].url })
+  worldCreateOpen.value = true
+}
+
+function openCreateCharacter() {
+  Object.assign(characterForm, { name: "", summary: "", cover_url: characterCovers[0].url })
+  characterCreateOpen.value = true
+}
+
+async function saveCreateWorld() {
+  if (!worldForm.name.trim()) {
+    message.warning("请填写世界名称")
+    return
+  }
+  const world = await api.createWorld({ name: worldForm.name.trim(), summary: worldForm.summary, cover_url: worldForm.cover_url })
+  worldIds.value = [...worldIds.value, world.id]
+  worldCreateOpen.value = false
+  await saveWorldLink()
+}
+
+async function saveCreateCharacter() {
+  if (!characterForm.name.trim()) {
+    message.warning("请填写角色姓名")
+    return
+  }
+  const created = await api.createCharacter({ name: characterForm.name.trim(), summary: characterForm.summary, cover_url: characterForm.cover_url })
   linkedCharacterIds.value = [...linkedCharacterIds.value, created.id]
+  characterCreateOpen.value = false
   await saveCharacterLinks()
 }
 
-async function createLinkedWorld() {
-  if (!newWorldName.value.trim() || !novel.value) return
-  const world = await api.createWorld({ name: newWorldName.value.trim(), summary: "" })
-  worldIds.value = [...worldIds.value, world.id]
-  newWorldName.value = ""
+async function pickWorld(id: string | null) {
+  if (!id || worldIds.value.includes(id)) return
+  worldIds.value = [...worldIds.value, id]
+  addWorldOpen.value = false
   await saveWorldLink()
+}
+
+async function pickCharacter(id: string | null) {
+  if (!id || linkedCharacterIds.value.includes(id)) return
+  linkedCharacterIds.value = [...linkedCharacterIds.value, id]
+  addCharacterOpen.value = false
+  await saveCharacterLinks()
 }
 
 async function addChapter() {
   if (!novel.value) return
   await api.createChapter(novel.value.id, `第${novel.value.chapters.length + 1}章`)
   await load()
-}
-
-async function moveChapter(chapter: ChapterBrief, direction: "up" | "down") {
-  const rows = await api.moveChapter(chapter.id, direction)
-  if (novel.value) {
-    novel.value.chapters = rows.map((row) => ({
-      id: row.id,
-      title: row.title,
-      position: row.position,
-      word_count: row.word_count,
-      volume_id: row.volume_id,
-      updated_at: row.updated_at,
-    }))
-  }
 }
 
 function removeChapter(chapter: ChapterBrief) {
@@ -206,37 +259,15 @@ function removeChapter(chapter: ChapterBrief) {
   })
 }
 
-function openOutline(parentId: string | null, node?: OutlineNode) {
-  Object.assign(outlineForm, {
-    id: node?.id ?? "",
-    parent_id: node ? node.parent_id : parentId,
-    world_id: node?.world_id ?? null,
-    title: node?.title ?? "",
-    content: node?.content ?? "",
-    notes: node?.notes ?? "",
-    status: node?.status ?? "pending",
-    character_ids: node?.character_ids ?? [],
-  })
-  outlineOpen.value = true
+async function addNode(parentId: string | null) {
+  menuKey.value = ""
+  const created = await api.createOutline(novelId.value, { title: "新节点", content: "", parent_id: parentId, status: "pending" })
+  await router.push(`/novels/${novelId.value}/outline/${created.id}`)
 }
 
-async function saveOutline() {
-  if (!outlineForm.title.trim()) return
-  const body = {
-    title: outlineForm.title,
-    content: outlineForm.content,
-    notes: outlineForm.notes,
-    status: outlineForm.status,
-    parent_id: outlineForm.parent_id,
-    clear_parent: outlineForm.parent_id === null,
-    world_id: outlineForm.world_id,
-    clear_world: outlineForm.world_id === null,
-    character_ids: outlineForm.character_ids,
-  }
-  if (outlineForm.id) await api.updateOutline(outlineForm.id, body)
-  else await api.createOutline(novelId.value, body)
-  outlineOpen.value = false
-  nodes.value = await api.outline(novelId.value)
+function openNode(node: OutlineNode) {
+  if (ignoreDrag.value) return
+  void router.push(`/novels/${novelId.value}/outline/${node.id}`)
 }
 
 async function moveNode(node: OutlineNode, direction: "up" | "down") {
@@ -269,6 +300,14 @@ async function toChapter(node: OutlineNode) {
 
 function onDragStart(id: string) {
   draggingId.value = id
+  ignoreDrag.value = false
+}
+
+function onDragEnd() {
+  ignoreDrag.value = true
+  window.setTimeout(() => {
+    ignoreDrag.value = false
+  }, 200)
 }
 
 async function onDrop(target: OutlineNode) {
@@ -316,19 +355,9 @@ async function confirmDraft(items: OutlineDraftNode[], parentId: string | null) 
   }
 }
 
-async function expandNode(node: OutlineNode) {
-  const result = await api.expandOutline(node.id)
-  outlineReport.value = result.content
-  outlineForm.id = node.id
-  outlineForm.title = node.title
-  outlineForm.content = result.content
-  outlineForm.notes = node.notes
-  outlineForm.status = node.status
-  outlineForm.parent_id = node.parent_id
-  outlineForm.world_id = node.world_id
-  outlineForm.character_ids = node.character_ids
-  outlineOpen.value = true
-  message.info("扩展建议已放进表单，保存后才会写入")
+function expandNode(node: OutlineNode) {
+  menuKey.value = ""
+  void router.push({ path: `/novels/${novelId.value}/outline/${node.id}`, query: { expand: "1" } })
 }
 
 async function checkOutline() {
@@ -344,7 +373,7 @@ async function acceptDraft() {
   message.success("大纲建议已写入")
 }
 
-function blankForeshadow() {
+function resetForeshadow() {
   Object.assign(foreshadowForm, {
     id: "",
     name: "",
@@ -362,10 +391,18 @@ function blankForeshadow() {
     notes: "",
     character_ids: [],
   })
+  foreshadowMore.value = false
+}
+
+function blankForeshadow() {
+  resetForeshadow()
+  foreshadowOpen.value = true
 }
 
 function editForeshadow(row: Foreshadow) {
   Object.assign(foreshadowForm, row)
+  foreshadowMore.value = false
+  foreshadowOpen.value = true
 }
 
 async function saveForeshadow() {
@@ -376,7 +413,8 @@ async function saveForeshadow() {
   const body = { ...foreshadowForm }
   if (foreshadowForm.id) await api.updateForeshadow(foreshadowForm.id, body)
   else await api.createForeshadow(novelId.value, body)
-  blankForeshadow()
+  foreshadowOpen.value = false
+  resetForeshadow()
   await loadForeshadows()
 }
 
@@ -394,7 +432,7 @@ function removeForeshadow(row: Foreshadow) {
 }
 
 async function askForeshadow() {
-  const result = await api.draftForeshadow(novelId.value, instruction.value)
+  const result = await api.draftForeshadow(novelId.value, foreshadowHint.value)
   foreshadowDraft.value = result.suggestion
 }
 
@@ -416,9 +454,10 @@ async function acceptReview() {
 
 function acceptForeshadowDraft() {
   if (!foreshadowDraft.value) return
-  blankForeshadow()
+  resetForeshadow()
   Object.assign(foreshadowForm, foreshadowDraft.value)
   foreshadowDraft.value = null
+  foreshadowOpen.value = true
   message.info("建议已放进表单，保存后才会写入")
 }
 
@@ -433,17 +472,16 @@ function jumpForeshadow(row: { plant_chapter_id: string | null; source_start: nu
 }
 
 async function unlinkWorld(id: string) {
+  menuKey.value = ""
   worldIds.value = worldIds.value.filter((item) => item !== id)
-  await saveWorldLink()
+  await saveWorldLink(true)
 }
 
 async function unlinkCharacter(id: string) {
+  menuKey.value = ""
   linkedCharacterIds.value = linkedCharacterIds.value.filter((item) => item !== id)
-  await saveCharacterLinks()
+  await saveCharacterLinks(true)
 }
-
-watch(treeOpen, (open) => localStorage.setItem("sf-outline-tree", open ? "1" : "0"))
-watch(aiOpen, (open) => localStorage.setItem("sf-outline-ai", open ? "1" : "0"))
 
 watch(() => [novelId.value, section.value, filterStatus.value, filterImportance.value], () => {
   void load().catch((error: unknown) => {
@@ -454,128 +492,153 @@ watch(() => [novelId.value, section.value, filterStatus.value, filterImportance.
 </script>
 
 <template>
-  <main class="page" v-if="novel">
-    <header class="workspace-head">
-      <div>
-        <h1>{{ sectionTitle(section) }}</h1>
-        <p class="muted">{{ novel.title }}</p>
+  <main class="page" v-if="novel" @click="menuKey = ''">
+    <header class="workspace-head pin-head">
+      <h1>{{ sectionTitle(section) }}</h1>
+      <div v-if="section === 'world'" class="actions">
+        <NButton size="small" @click="openCreateWorld">创建并关联</NButton>
+        <NButton size="small" @click.stop="addWorldOpen = !addWorldOpen">添加关联</NButton>
+        <NSelect v-if="addWorldOpen" :value="null" :options="availableWorldOptions" placeholder="选择已有世界" style="width: 220px" @update:value="pickWorld" />
+      </div>
+      <div v-else-if="section === 'characters'" class="actions">
+        <NButton size="small" @click="openCreateCharacter">创建并关联</NButton>
+        <NButton size="small" @click.stop="addCharacterOpen = !addCharacterOpen">添加关联</NButton>
+        <NSelect v-if="addCharacterOpen" :value="null" :options="availableCharacterOptions" placeholder="选择已有角色" style="width: 220px" @update:value="pickCharacter" />
+      </div>
+      <div v-else-if="section === 'articles'" class="actions">
+        <NButton size="small" @click="addChapter">新增章节</NButton>
+      </div>
+      <div v-else-if="section === 'outline'" class="actions">
+        <NButton size="small" @click="addNode(null)">添加节点</NButton>
+      </div>
+      <div v-else-if="section === 'foreshadows'" class="actions">
+        <NSelect v-model:value="filterStatus" clearable :options="foreshadowStatus" placeholder="状态" style="width: 140px" />
+        <NSelect v-model:value="filterImportance" clearable :options="importanceOptions" placeholder="重要程度" style="width: 140px" />
+        <NButton size="small" @click="blankForeshadow">新建</NButton>
       </div>
     </header>
 
-    <section v-if="section === 'overview'" class="stats">
-      <article class="card stat"><strong>{{ novel.chapter_count }}</strong><span>章节</span></article>
-      <article class="card stat"><strong>{{ novel.word_count }}</strong><span>字</span></article>
-      <article class="card stat"><strong>{{ novel.worlds.length }}</strong><span>关联世界</span></article>
-      <article class="card stat"><strong>{{ novel.characters.length }}</strong><span>关联角色</span></article>
-      <article class="card library-card">
-        <p>{{ novel.summary || "还没有简介" }}</p>
-        <p class="muted">{{ novel.worlds.map((row) => row.name).join("、") || "还没有关联世界" }}</p>
-      </article>
+    <section v-if="section === 'overview'">
+      <div class="overview-top">
+        <img class="book-cover" :src="coverSrc(novel.cover_url)" alt="" />
+        <div>
+          <p class="overview-summary">{{ novel.summary || "还没有简介" }}</p>
+          <div class="overview-stats">
+            <article class="stat"><strong>{{ novel.chapter_count }}</strong><span>章节</span></article>
+            <article class="stat"><strong>{{ novel.word_count }}</strong><span>字</span></article>
+            <article class="stat"><strong>{{ novel.worlds.length }}</strong><span>关联世界</span></article>
+            <article class="stat"><strong>{{ novel.characters.length }}</strong><span>关联角色</span></article>
+          </div>
+        </div>
+      </div>
+      <div v-if="linkedWorldCards.length" class="book-shelf">
+        <article v-for="world in linkedWorldCards" :key="world.id" class="resource-card" @click="router.push(resourcePath('worlds', world.id))">
+          <img class="book-cover" :src="coverSrc(world.cover_url, 'world')" alt="" />
+          <div class="book-copy">
+            <h2>{{ world.name }}</h2>
+            <p class="summary">{{ world.summary || "还没有介绍" }}</p>
+            <div class="meta"><span>{{ world.novel_count }} 本小说</span></div>
+          </div>
+        </article>
+      </div>
     </section>
 
     <section v-else-if="section === 'world'">
-      <article v-for="world in novel.worlds" :key="world.id" class="card row-card">
-        <strong>{{ world.name }}</strong>
-        <div class="actions">
-          <NButton size="small" type="primary" @click="router.push(resourcePath('worlds', world.id))">查看</NButton>
-          <NButton size="small" quaternary @click="unlinkWorld(world.id)">解除关联</NButton>
-        </div>
-      </article>
-      <div class="panel" style="padding: 18px">
-        <NFormItem label="添加已有世界">
-          <NSelect v-model:value="worldIds" multiple :options="worldOptions" placeholder="可以从世界库关联多个世界" />
-        </NFormItem>
-        <NButton type="primary" @click="saveWorldLink">保存关联</NButton>
-        <p class="muted">解除关联不会删除世界。多个小说可以关联同一个世界。</p>
-        <div class="actions" style="margin-top: 16px">
-          <NInput v-model:value="newWorldName" placeholder="新建全局世界并关联到本书" style="max-width: 280px" />
-          <NButton @click="createLinkedWorld">创建并关联</NButton>
-        </div>
+      <p v-if="linkedWorldCards.length === 0" class="empty">还没有关联世界。</p>
+      <div class="book-shelf">
+        <article v-for="world in linkedWorldCards" :key="world.id" class="resource-card" @click="router.push(resourcePath('worlds', world.id))">
+          <img class="book-cover" :src="coverSrc(world.cover_url, 'world')" alt="" />
+          <div class="book-copy">
+            <h2>{{ world.name }}</h2>
+            <p class="summary">{{ world.summary || "还没有介绍" }}</p>
+            <div class="meta"><span>{{ world.novel_count }} 本小说</span></div>
+          </div>
+          <div class="card-menu" @click.stop>
+            <button class="icon-button" type="button" aria-label="世界设置" @click="menuKey = menuKey === world.id ? '' : world.id">⋯</button>
+            <div v-if="menuKey === world.id" class="menu-list">
+              <button class="danger" type="button" @click="unlinkWorld(world.id)">解除关联</button>
+            </div>
+          </div>
+        </article>
       </div>
     </section>
 
     <section v-else-if="section === 'characters'">
-      <article v-for="row in novel.characters" :key="row.id" class="card row-card">
-        <strong>{{ row.name }}</strong>
-        <div class="actions">
-          <NButton size="small" type="primary" @click="router.push(resourcePath('characters', row.id))">查看</NButton>
-          <NButton size="small" quaternary @click="unlinkCharacter(row.id)">解除关联</NButton>
-        </div>
-      </article>
-      <div class="panel" style="padding: 18px">
-        <NFormItem label="添加已有角色">
-          <NSelect v-model:value="linkedCharacterIds" multiple :options="characterOptions" placeholder="可以从全局角色库关联" />
-        </NFormItem>
-        <NButton type="primary" @click="saveCharacterLinks">保存关联</NButton>
-        <p class="muted">解除关联不会删除角色库里的档案。时期、专属版本和关系图留在后续阶段。</p>
-        <div class="actions" style="margin-top: 16px">
-          <NInput v-model:value="newCharacterName" placeholder="新建全局角色并关联到本书" style="max-width: 280px" />
-          <NButton @click="createLinkedCharacter">创建并关联</NButton>
-        </div>
+      <p v-if="linkedCharacterCards.length === 0" class="empty">还没有关联角色。</p>
+      <div class="book-shelf">
+        <article v-for="row in linkedCharacterCards" :key="row.id" class="resource-card" @click="router.push(resourcePath('characters', row.id))">
+          <img class="book-cover" :src="coverSrc(row.cover_url, 'character')" alt="" />
+          <div class="book-copy">
+            <h2>{{ row.name }}</h2>
+            <p class="summary">{{ row.summary || "还没有介绍" }}</p>
+            <div class="meta"><span>{{ row.novel_count }} 本小说</span></div>
+          </div>
+          <div class="card-menu" @click.stop>
+            <button class="icon-button" type="button" aria-label="角色设置" @click="menuKey = menuKey === row.id ? '' : row.id">⋯</button>
+            <div v-if="menuKey === row.id" class="menu-list">
+              <button class="danger" type="button" @click="unlinkCharacter(row.id)">解除关联</button>
+            </div>
+          </div>
+        </article>
       </div>
     </section>
 
     <section v-else-if="section === 'articles'">
-      <div class="section-title">
-        <strong>章节</strong>
-        <NButton size="small" @click="addChapter">新增章节</NButton>
-      </div>
-      <article v-for="chapter in novel.chapters" :key="chapter.id" class="card row-card">
+      <article v-for="chapter in novel.chapters" :key="chapter.id" class="chapter-line" @click="router.push(`/write/${novel.id}/${chapter.id}`)">
         <div>
           <strong>{{ chapter.title }}</strong>
-          <div class="meta"><span>第 {{ chapter.position }} 章</span><span>{{ chapter.word_count }} 字</span></div>
+          <div class="meta"><span>{{ chapter.word_count }} 字</span></div>
         </div>
-        <div class="actions">
-          <NButton size="small" quaternary @click="moveChapter(chapter, 'up')">上移</NButton>
-          <NButton size="small" quaternary @click="moveChapter(chapter, 'down')">下移</NButton>
-          <NButton size="small" type="primary" @click="router.push(`/write/${novel.id}/${chapter.id}`)">写作</NButton>
-          <NButton size="small" quaternary @click="removeChapter(chapter)">删除</NButton>
+        <p class="chapter-excerpt">{{ chapter.excerpt || "还没有正文" }}</p>
+        <div class="card-menu" @click.stop>
+          <button class="icon-button" type="button" aria-label="章节设置" @click="menuKey = menuKey === chapter.id ? '' : chapter.id">⋯</button>
+          <div v-if="menuKey === chapter.id" class="menu-list">
+            <button class="danger" type="button" @click="removeChapter(chapter)">删除</button>
+          </div>
         </div>
       </article>
     </section>
 
-    <section v-else-if="section === 'outline'">
-      <div class="section-title">
-        <button class="text-button" type="button" @click="treeOpen = !treeOpen"><strong>树状大纲 {{ treeOpen ? "−" : "+" }}</strong></button>
-        <NButton size="small" @click="openOutline(null)">添加节点</NButton>
-      </div>
-      <p v-if="treeOpen && nodes.length === 0" class="empty">还没有大纲。可以从一个节点开始，也可以先看 AI 建议。</p>
-      <template v-if="treeOpen">
-      <article
-        v-for="node in orderedNodes"
-        :key="node.id"
-        class="card row-card"
-        :style="{ marginLeft: `${depth(node) * 22}px` }"
-        draggable="true"
-        @dragstart="onDragStart(node.id)"
-        @dragover.prevent
-        @drop="onDrop(node)"
-      >
-        <div>
-          <strong>{{ node.title }}</strong>
-          <div class="meta">
-            <span>{{ labelOf(outlineStatus, node.status) }}</span>
-            <span v-if="node.chapter_id">已对应章节</span>
-            <button v-if="node.world_id" class="text-button" type="button" @click="router.push(resourcePath('worlds', node.world_id))">{{ linkedWorldOptions.find((item) => item.value === node.world_id)?.label || "世界" }}</button>
-            <button v-for="characterId in node.character_ids" :key="characterId" class="text-button" type="button" @click="router.push(resourcePath('characters', characterId))">{{ linkedCharacterOptions.find((item) => item.value === characterId)?.label || "角色" }}</button>
+    <section v-else-if="section === 'outline'" class="outline-layout">
+      <div>
+        <p v-if="nodes.length === 0" class="empty">还没有大纲。可以从一个节点开始，也可以先看右侧的建议。</p>
+        <article
+          v-for="node in visibleNodes"
+          :key="node.id"
+          class="outline-node"
+          :style="{ marginLeft: `${depth(node) * 16}px` }"
+          draggable="true"
+          @dragstart="onDragStart(node.id)"
+          @dragend="onDragEnd"
+          @dragover.prevent
+          @drop="onDrop(node)"
+          @click="openNode(node)"
+        >
+          <button v-if="hasChildren(node.id)" class="fold" type="button" :aria-label="collapsed.has(node.id) ? '展开' : '折叠'" @click.stop="toggleFold(node.id)">{{ collapsed.has(node.id) ? "▸" : "▾" }}</button>
+          <span v-else class="fold"></span>
+          <div>
+            <strong>{{ node.title }}</strong>
+            <div class="meta">
+              <span>{{ labelOf(outlineStatus, node.status) }}</span>
+              <span v-if="node.chapter_id">已对应章节</span>
+            </div>
+            <p v-if="node.content" class="chapter-excerpt">{{ node.content }}</p>
           </div>
-          <p v-if="node.content" class="summary">{{ node.content }}</p>
-        </div>
-        <div class="actions">
-          <NButton size="small" quaternary @click="moveNode(node, 'up')">上移</NButton>
-          <NButton size="small" quaternary @click="moveNode(node, 'down')">下移</NButton>
-          <NButton size="small" @click="openOutline(node.id)">子节点</NButton>
-          <NButton size="small" @click="openOutline(null, node)">编辑</NButton>
-          <NButton size="small" @click="expandNode(node)">扩展建议</NButton>
-          <NButton size="small" @click="toChapter(node)">{{ node.chapter_id ? "打开章节" : "转为章节" }}</NButton>
-          <NButton size="small" quaternary @click="removeNode(node)">删除</NButton>
-        </div>
-      </article>
-      </template>
-
-      <div class="panel" style="padding: 16px; margin-top: 18px">
-        <button class="text-button" type="button" @click="aiOpen = !aiOpen"><strong>AI 建议 {{ aiOpen ? "−" : "+" }}</strong></button>
-        <div v-show="aiOpen">
+          <div class="card-menu" @click.stop>
+            <button class="icon-button" type="button" aria-label="大纲设置" @click="menuKey = menuKey === node.id ? '' : node.id">⋯</button>
+            <div v-if="menuKey === node.id" class="menu-list">
+              <button type="button" @click="moveNode(node, 'up')">上移</button>
+              <button type="button" @click="moveNode(node, 'down')">下移</button>
+              <button type="button" @click="addNode(node.id)">子节点</button>
+              <button type="button" @click="expandNode(node)">扩展建议</button>
+              <button type="button" @click="toChapter(node)">{{ node.chapter_id ? "打开章节" : "转为章节" }}</button>
+              <button class="danger" type="button" @click="removeNode(node)">删除</button>
+            </div>
+          </div>
+        </article>
+      </div>
+      <aside class="panel pin-side">
+        <strong>AI 建议</strong>
         <p class="muted">建议先展示出来。确认后才会写入这本小说的大纲。</p>
         <NInput v-model:value="instruction" type="textarea" placeholder="想让大纲往哪边发展" :autosize="{ minRows: 2, maxRows: 4 }" />
         <div class="actions" style="margin-top: 10px">
@@ -585,59 +648,94 @@ watch(() => [novelId.value, section.value, filterStatus.value, filterImportance.
         <p v-if="outlineReport" class="suggestion">{{ outlineReport }}</p>
         <div v-if="draft" style="margin-top: 12px">
           <p class="meta">{{ draftProvider === "demo" ? "本地示例" : "模型" }}</p>
-          <ul>
-            <li v-for="item in draft" :key="item.title">{{ item.title }}：{{ item.content }}</li>
-          </ul>
+          <p v-for="item in draft" :key="item.title">{{ item.title }}：{{ item.content }}</p>
           <div class="actions">
             <NButton size="small" type="primary" @click="acceptDraft">确认写入</NButton>
             <NButton size="small" @click="draft = null">放弃</NButton>
           </div>
         </div>
-        </div>
-      </div>
-
-      <div v-if="outlineOpen" class="panel" style="padding: 16px; margin-top: 18px">
-        <NForm label-placement="top">
-          <NFormItem label="标题"><NInput v-model:value="outlineForm.title" /></NFormItem>
-          <NFormItem label="内容"><NInput v-model:value="outlineForm.content" type="textarea" :autosize="{ minRows: 3, maxRows: 6 }" /></NFormItem>
-          <NFormItem label="备注"><NInput v-model:value="outlineForm.notes" /></NFormItem>
-          <NFormItem label="状态"><NSelect v-model:value="outlineForm.status" :options="outlineStatus" /></NFormItem>
-          <p class="muted">地点和事件还没有独立档案，这一阶段只能关联本书正在使用的角色和世界。</p>
-          <NFormItem label="关联世界"><NSelect v-model:value="outlineForm.world_id" clearable :options="linkedWorldOptions" placeholder="只显示本书正在使用的世界" /></NFormItem>
-          <NFormItem label="关联角色"><NSelect v-model:value="outlineForm.character_ids" multiple :options="linkedCharacterOptions" placeholder="只显示本书正在使用的角色" /></NFormItem>
-        </NForm>
-        <NButton type="primary" @click="saveOutline">保存节点</NButton>
-      </div>
+      </aside>
     </section>
 
-    <section v-else-if="section === 'foreshadows'" class="split">
+    <section v-else-if="section === 'foreshadows'" class="outline-layout">
       <div>
-        <div class="actions" style="margin-bottom: 12px">
-          <NSelect v-model:value="filterStatus" clearable :options="foreshadowStatus" placeholder="状态" style="width: 140px" />
-          <NSelect v-model:value="filterImportance" clearable :options="importanceOptions" placeholder="重要程度" style="width: 140px" />
-          <NButton size="small" @click="blankForeshadow">新建</NButton>
-        </div>
-        <article v-for="row in foreshadows" :key="row.id" class="card row-card" @click="editForeshadow(row)">
-          <div>
-            <strong>{{ row.name }}</strong>
-            <div class="meta">
-              <span>{{ labelOf(foreshadowStatus, row.status) }}</span>
-              <span>{{ labelOf(importanceOptions, row.importance) }}</span>
-              <span v-if="row.kind">{{ row.kind }}</span>
-            </div>
+      <article v-for="row in foreshadows" :key="row.id" class="card row-card" @click="editForeshadow(row)">
+        <div>
+          <strong>{{ row.name }}</strong>
+          <div class="meta">
+            <span>{{ labelOf(foreshadowStatus, row.status) }}</span>
+            <span>{{ labelOf(importanceOptions, row.importance) }}</span>
+            <span v-if="row.kind">{{ row.kind }}</span>
           </div>
-          <NButton size="small" quaternary @click.stop="removeForeshadow(row)">删除</NButton>
-        </article>
-        <p v-if="foreshadows.length === 0" class="empty">没有符合筛选的伏笔。</p>
+          <p v-if="row.content" class="chapter-excerpt">{{ row.content }}</p>
+        </div>
+        <NButton size="small" quaternary @click.stop="removeForeshadow(row)">删除</NButton>
+      </article>
+      <p v-if="foreshadows.length === 0" class="empty">没有符合筛选的伏笔。</p>
       </div>
-      <div class="panel" style="padding: 16px">
-        <NForm label-placement="top">
-          <NFormItem label="名称"><NInput v-model:value="foreshadowForm.name" /></NFormItem>
-          <NFormItem label="内容"><NInput v-model:value="foreshadowForm.content" type="textarea" :autosize="{ minRows: 3, maxRows: 6 }" /></NFormItem>
-          <NFormItem label="类型"><NInput v-model:value="foreshadowForm.kind" placeholder="人物、物品、事件或设定" /></NFormItem>
+      <aside class="panel pin-side">
+        <strong>AI 建议</strong>
+        <p class="muted">确认前只放进新建窗口，不会直接改正式伏笔。</p>
+        <NInput v-model:value="foreshadowHint" type="textarea" placeholder="想补一条什么样的伏笔" :autosize="{ minRows: 2, maxRows: 4 }" />
+        <div class="actions" style="margin-top: 10px">
+          <NButton size="small" @click="askForeshadow">根据本书生成一条建议</NButton>
+          <NButton size="small" @click="reviewForeshadows('forgotten')">检查遗忘</NButton>
+          <NButton size="small" @click="reviewForeshadows('payoff')">检查回收</NButton>
+          <NButton size="small" @click="reviewForeshadows('conflict')">检查冲突</NButton>
+        </div>
+        <article v-if="foreshadowReviewReport" class="card" style="padding: 12px; margin-top: 10px">
+          <p>{{ foreshadowReviewReport }}</p>
+          <p v-for="item in foreshadowReview" :key="item.foreshadow_id">{{ item.name }}：{{ item.reason }}</p>
+          <div class="actions">
+            <NButton size="small" type="primary" @click="acceptReview">确认</NButton>
+            <NButton size="small" @click="foreshadowReview = []; foreshadowReviewReport = ''">放弃</NButton>
+          </div>
+        </article>
+        <article v-if="foreshadowDraft" class="card" style="padding: 12px; margin-top: 10px">
+          <strong>{{ foreshadowDraft.name }}</strong>
+          <p>{{ foreshadowDraft.content }}</p>
+          <div class="actions">
+            <NButton size="small" type="primary" @click="acceptForeshadowDraft">放进表单</NButton>
+            <NButton size="small" @click="foreshadowDraft = null">放弃</NButton>
+          </div>
+        </article>
+      </aside>
+    </section>
+
+    <NModal v-model:show="worldCreateOpen" preset="card" title="创建并关联" style="width: 640px">
+      <NForm label-placement="top">
+        <NFormItem label="名称"><NInput v-model:value="worldForm.name" /></NFormItem>
+        <NFormItem label="介绍"><NInput v-model:value="worldForm.summary" type="textarea" :autosize="{ minRows: 3, maxRows: 5 }" /></NFormItem>
+        <NFormItem label="图片"><CoverField v-model="worldForm.cover_url" :choices="worldCovers" owner-kind="world" /></NFormItem>
+      </NForm>
+      <template #footer>
+        <NButton type="primary" @click="saveCreateWorld">保存</NButton>
+      </template>
+    </NModal>
+
+    <NModal v-model:show="characterCreateOpen" preset="card" title="创建并关联" style="width: 640px">
+      <NForm label-placement="top">
+        <NFormItem label="姓名"><NInput v-model:value="characterForm.name" /></NFormItem>
+        <NFormItem label="基础介绍"><NInput v-model:value="characterForm.summary" type="textarea" :autosize="{ minRows: 3, maxRows: 5 }" /></NFormItem>
+        <NFormItem label="图片"><CoverField v-model="characterForm.cover_url" :choices="characterCovers" owner-kind="character" /></NFormItem>
+      </NForm>
+      <template #footer>
+        <NButton type="primary" @click="saveCreateCharacter">保存</NButton>
+      </template>
+    </NModal>
+
+    <NModal v-model:show="foreshadowOpen" preset="card" :title="foreshadowForm.id ? '编辑伏笔' : '新建伏笔'" style="width: 520px">
+      <NForm label-placement="top">
+        <NFormItem label="名称"><NInput v-model:value="foreshadowForm.name" /></NFormItem>
+        <NFormItem label="内容"><NInput v-model:value="foreshadowForm.content" type="textarea" :autosize="{ minRows: 3, maxRows: 5 }" /></NFormItem>
+        <div class="form-row">
           <NFormItem label="重要程度"><NSelect v-model:value="foreshadowForm.importance" :options="importanceOptions" /></NFormItem>
           <NFormItem label="状态"><NSelect v-model:value="foreshadowForm.status" :options="foreshadowStatus" /></NFormItem>
-          <NFormItem label="关联角色"><NSelect v-model:value="foreshadowForm.character_ids" multiple :options="linkedCharacterOptions" placeholder="只显示本书正在使用的角色" /></NFormItem>
+        </div>
+        <NFormItem label="类型"><NInput v-model:value="foreshadowForm.kind" placeholder="人物、物品、事件或设定" /></NFormItem>
+        <button class="text-button" type="button" @click="foreshadowMore = !foreshadowMore">{{ foreshadowMore ? "收起" : "更多" }}</button>
+        <template v-if="foreshadowMore">
+          <NFormItem label="关联角色"><NSelect v-model:value="foreshadowForm.character_ids" multiple :options="linkedCharacterOptions" placeholder="本书正在使用的角色" /></NFormItem>
           <NFormItem label="关联大纲"><NSelect v-model:value="foreshadowForm.outline_node_id" clearable :options="nodeOptions" /></NFormItem>
           <NFormItem label="埋下位置"><NSelect v-model:value="foreshadowForm.plant_chapter_id" clearable :options="chapterOptions" /></NFormItem>
           <NFormItem v-if="foreshadowForm.source_quote" label="原文">
@@ -646,36 +744,12 @@ watch(() => [novelId.value, section.value, filterStatus.value, filterImportance.
           </NFormItem>
           <NFormItem label="预计回收"><NSelect v-model:value="foreshadowForm.expected_chapter_id" clearable :options="chapterOptions" /></NFormItem>
           <NFormItem label="实际回收"><NSelect v-model:value="foreshadowForm.actual_chapter_id" clearable :options="chapterOptions" /></NFormItem>
-          <NFormItem label="备注"><NInput v-model:value="foreshadowForm.notes" type="textarea" /></NFormItem>
-        </NForm>
-        <div class="actions">
-          <NButton type="primary" @click="saveForeshadow">保存伏笔</NButton>
-        </div>
-        <div style="margin-top: 18px">
-          <strong>AI 建议</strong>
-          <p class="muted">确认前只放进表单，不会直接改正式伏笔。</p>
-          <NButton size="small" @click="askForeshadow">根据本书生成一条建议</NButton>
-          <NButton size="small" @click="reviewForeshadows('forgotten')">检查遗忘</NButton>
-          <NButton size="small" @click="reviewForeshadows('payoff')">检查回收</NButton>
-          <NButton size="small" @click="reviewForeshadows('conflict')">检查冲突</NButton>
-          <article v-if="foreshadowReviewReport" class="card" style="padding: 12px; margin-top: 10px">
-            <p>{{ foreshadowReviewReport }}</p>
-            <p v-for="item in foreshadowReview" :key="item.foreshadow_id">{{ item.name }}：{{ item.reason }}</p>
-            <div class="actions">
-              <NButton size="small" type="primary" @click="acceptReview">确认</NButton>
-              <NButton size="small" @click="foreshadowReview = []; foreshadowReviewReport = ''">放弃</NButton>
-            </div>
-          </article>
-          <article v-if="foreshadowDraft" class="card" style="padding: 12px; margin-top: 10px">
-            <strong>{{ foreshadowDraft.name }}</strong>
-            <p>{{ foreshadowDraft.content }}</p>
-            <div class="actions">
-              <NButton size="small" type="primary" @click="acceptForeshadowDraft">放进表单</NButton>
-              <NButton size="small" @click="foreshadowDraft = null">放弃</NButton>
-            </div>
-          </article>
-        </div>
-      </div>
-    </section>
+          <NFormItem label="备注"><NInput v-model:value="foreshadowForm.notes" type="textarea" :autosize="{ minRows: 2, maxRows: 4 }" /></NFormItem>
+        </template>
+      </NForm>
+      <template #footer>
+        <NButton type="primary" @click="saveForeshadow">保存</NButton>
+      </template>
+    </NModal>
   </main>
 </template>

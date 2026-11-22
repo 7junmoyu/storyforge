@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Table, Text, func
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Table, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -36,6 +36,10 @@ character_worlds = Table(
     Column("character_id", ForeignKey("characters.id", ondelete="CASCADE"), primary_key=True),
     Column("world_id", ForeignKey("worlds.id", ondelete="RESTRICT"), primary_key=True),
     Column("note", Text, nullable=False, default=""),
+    Column("scope", String(32), nullable=False, default="global"),
+    Column("source", String(80), nullable=False, default="手动"),
+    Column("novel_id", ForeignKey("novels.id", ondelete="SET NULL")),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False),
 )
 
 foreshadow_characters = Table(
@@ -52,6 +56,7 @@ class World(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(200))
     summary: Mapped[str] = mapped_column(Text, default="")
+    cover_url: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -64,16 +69,104 @@ class Character(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(200))
     summary: Mapped[str] = mapped_column(Text, default="")
+    cover_url: Mapped[str] = mapped_column(String(500), default="")
+    attributes: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     novels: Mapped[list["Novel"]] = relationship(secondary=novel_characters, back_populates="characters")
 
 
+class CharacterPeriod(Base):
+    __tablename__ = "character_periods"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    character_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("characters.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    time_range: Mapped[str] = mapped_column(String(200), default="")
+    attributes: Mapped[str] = mapped_column(Text, default="{}")
+    position: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CharacterVersion(Base):
+    __tablename__ = "character_versions"
+    __table_args__ = (UniqueConstraint("novel_id", "character_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    novel_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("novels.id", ondelete="CASCADE"), index=True)
+    character_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("characters.id", ondelete="CASCADE"), index=True)
+    period_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("character_periods.id", ondelete="SET NULL"))
+    name: Mapped[str] = mapped_column(String(200))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    attributes: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class NovelWorldSetting(Base):
+    __tablename__ = "novel_world_settings"
+    __table_args__ = (UniqueConstraint("novel_id", "world_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    novel_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("novels.id", ondelete="CASCADE"), index=True)
+    world_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("worlds.id", ondelete="CASCADE"), index=True)
+    supplement: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WorldRecord(Base):
+    __tablename__ = "world_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    world_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("worlds.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(200))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    time_label: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AttributeTemplate(Base):
+    __tablename__ = "attribute_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(200))
+    target: Mapped[str] = mapped_column(String(32), default="character")
+    fields: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MediaAsset(Base):
+    __tablename__ = "media_assets"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    owner_kind: Mapped[str] = mapped_column(String(32), default="")
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True, index=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    stored_name: Mapped[str] = mapped_column(String(255))
+    mime: Mapped[str] = mapped_column(String(120), default="")
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class NovelGroup(Base):
+    __tablename__ = "novel_groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Novel(Base):
     __tablename__ = "novels"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("novel_groups.id", ondelete="SET NULL"), nullable=True, index=True)
+    grouped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     title: Mapped[str] = mapped_column(String(200))
     summary: Mapped[str] = mapped_column(Text, default="")
     genre: Mapped[str] = mapped_column(String(80), default="")
@@ -117,6 +210,7 @@ class Chapter(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     novel_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("novels.id", ondelete="CASCADE"), index=True)
     volume_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("volumes.id", ondelete="SET NULL"))
+    world_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("worlds.id", ondelete="SET NULL"))
     title: Mapped[str] = mapped_column(String(200))
     content: Mapped[str] = mapped_column(Text, default="<p></p>")
     position: Mapped[int] = mapped_column(Integer, default=1)

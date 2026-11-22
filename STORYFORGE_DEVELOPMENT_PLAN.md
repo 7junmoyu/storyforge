@@ -1,4 +1,5 @@
 # StoryForge 总体开发计划（Development Plan）
+注意：不要更改该文件内容
 
 > 版本：V1.0  
 > 制定日期：2026-11-19  
